@@ -13,6 +13,7 @@ my_tb.csv needs columns: account_code, debit, credit   (totals for the whole per
 """
 import sys, os, argparse
 import pandas as pd
+from decimal import Decimal, InvalidOperation
 HERE=os.path.dirname(os.path.abspath(__file__)); OFFICIAL=os.path.join(HERE,"..","03_Data","csv")
 def rd(d,f,**k): return pd.read_csv(os.path.join(d,f+".csv"),**k)
 def ok(flag,name,detail): print(("PASS  " if flag else "FAIL  ")+name+"  -  "+detail); return flag
@@ -32,13 +33,17 @@ def checks(d):
     late=int((pd.to_datetime(x.period_start)>pd.to_datetime(x.exit_date)).sum()); r.append(ok(late==0,"Nobody is paid after leaving",f"payroll rows after exit_date={late}"))
     print(f"\n{sum(r)}/{len(r)} checks passed"); return all(r)
 def payroll(csv,d):
-    mine=pd.read_csv(csv); off=rd(d,"payroll_items")[["run_id","employee_id","gross_pay","total_deductions","net_pay"]]
-    m=off.merge(mine,on=["run_id","employee_id"],how="left",suffixes=("","_mine")); found=m.net_pay_mine.notna().sum()
+    mine=pd.read_csv(csv,dtype=str,keep_default_na=False)
+    off=rd(d,"payroll_items",dtype=str,keep_default_na=False)[["run_id","employee_id","gross_pay","total_deductions","net_pay"]]
+    m=off.merge(mine,on=["run_id","employee_id"],how="left",suffixes=("","_mine"))
+    found=m.net_pay_mine.fillna("").ne("").sum()
     print(f"Rows expected {len(off)}, rows found in your file {found}")
-    bad=pd.Series(False,index=m.index)
+    bad=m.net_pay_mine.fillna("").eq("")
     for c in ["gross_pay","total_deductions","net_pay"]:
-        if c+"_mine" in m: bad|=(m[c]-m[c+"_mine"]).abs()>0.01
-    bad|=m.net_pay_mine.isna(); good=int((~bad).sum()); print(f"Exact matches (within 1 paisa): {good}/{len(off)} = {100*good/len(off):.2f}%")
+        if c+"_mine" in m:
+            actual=m[c+"_mine"].fillna("")
+            bad|=pd.Series([not within_one_paisa(expected,calculated) for expected,calculated in zip(m[c],actual)],index=m.index)
+    good=int((~bad).sum()); print(f"Exact matches (within 1 paisa): {good}/{len(off)} = {100*good/len(off):.2f}%")
     if bad.any(): print("\nFirst mismatches (compare these rows by hand):"); print(m[bad].head(8).to_string(index=False))
     return not bad.any()
 def tb(csv,d):
@@ -51,6 +56,14 @@ def summary(d):
     jl,coa,pr=rd(d,"journal_lines"),rd(d,"chart_of_accounts"),rd(d,"payroll_runs")
     m=jl.merge(coa[["account_code","account_type"]],on="account_code"); m["net"]=m.credit-m.debit; g=m.groupby("account_type").net.sum()
     print(f"Revenue  {g['INCOME']:,.2f}\nExpenses {-g['EXPENSE']:,.2f}\nProfit   {g['INCOME']+g['EXPENSE']:,.2f}\nPayroll runs {len(pr)}, employer cost {pr.total_employer_cost.sum():,.2f}")
+
+def within_one_paisa(expected, actual):
+    """Compare currency values exactly; binary floats can misclassify one paisa."""
+    try:
+        return abs(Decimal(str(expected)) - Decimal(str(actual))) <= Decimal("0.01")
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
 if __name__=="__main__":
     ap=argparse.ArgumentParser(); ap.add_argument("cmd",choices=["checks","payroll","trial-balance","summary"]); ap.add_argument("file",nargs="?"); ap.add_argument("--data",default=OFFICIAL); a=ap.parse_args()
     res={"checks":lambda:checks(a.data),"summary":lambda:summary(a.data),"payroll":lambda:payroll(a.file,a.data),"trial-balance":lambda:tb(a.file,a.data)}[a.cmd]()

@@ -78,6 +78,8 @@ def test_dashboard_exposes_employee_actions(client):
     page=client.get("/")
     assert page.status_code==200
     assert "Add employee" in page.text and "data-action=\"edit\"" in page.text and "data-action=\"delete\"" in page.text
+    assert "not connected" not in page.text.lower()
+    assert client.get("/assets/dashboard_sections.js").status_code==200
 
 def test_setting_departed_status_soft_deletes_from_directory(client):
     client.post("/employees",json=payload())

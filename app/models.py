@@ -1,6 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Date, ForeignKey, Index, Integer, Numeric, String, text
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -115,3 +115,268 @@ class SalaryStructure(Base):
         Index("uq_active_salary_component_start", "employee_id", "component_id", "effective_from", unique=True,
               sqlite_where=text("is_active = 1"), postgresql_where=text("is_active")),
     )
+
+class AttendanceRecord(Base):
+    __tablename__ = "attendance_records"
+    attendance_id: Mapped[str] = mapped_column(String(24), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    attendance_date: Mapped[date] = mapped_column(Date, index=True)
+    weekday: Mapped[str] = mapped_column(String(12))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    leave_type_code: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    check_in: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    check_out: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    hours_worked: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    overtime_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    late_flag: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    data_quality_flag: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.department_id"), nullable=True, index=True)
+    __table_args__ = (UniqueConstraint("employee_id", "attendance_date", name="uq_attendance_employee_date"),)
+
+class LeaveType(Base):
+    __tablename__ = "leave_types"
+    leave_type_code: Mapped[str] = mapped_column(String(10), primary_key=True)
+    leave_type_name: Mapped[str] = mapped_column(String(100))
+    pay_type: Mapped[str] = mapped_column(String(20))
+    annual_quota_days: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    prorated_for_joiners: Mapped[bool] = mapped_column(default=False)
+    carry_forward_allowed: Mapped[bool] = mapped_column(default=False)
+    max_carry_forward_days: Mapped[Decimal] = mapped_column(Numeric(7, 2), default=0)
+    policy_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+class LeaveBalance(Base):
+    __tablename__ = "leave_balances"
+    balance_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    leave_type_code: Mapped[str] = mapped_column(ForeignKey("leave_types.leave_type_code"), index=True)
+    financial_year: Mapped[str] = mapped_column(String(12))
+    as_of_date: Mapped[date] = mapped_column(Date)
+    entitlement_days: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    used_days: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    balance_days: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("employee_id", "leave_type_code", "financial_year", name="uq_leave_balance_employee_type_fy"),
+        CheckConstraint("entitlement_days >= 0 AND used_days >= 0 AND balance_days >= 0", name="ck_leave_balance_nonnegative"),
+    )
+
+class LeaveRequest(Base):
+    __tablename__ = "leave_requests"
+    leave_request_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    leave_type_code: Mapped[str] = mapped_column(ForeignKey("leave_types.leave_type_code"), index=True)
+    start_date: Mapped[date] = mapped_column(Date, index=True)
+    end_date: Mapped[date] = mapped_column(Date)
+    days: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    reason: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    applied_on: Mapped[date] = mapped_column(Date)
+    approver_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    decided_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_half_day: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+class Holiday(Base):
+    __tablename__ = "holidays"
+    holiday_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    holiday_name: Mapped[str] = mapped_column(String(150))
+    holiday_type: Mapped[str] = mapped_column(String(30))
+    weekday: Mapped[str] = mapped_column(String(12))
+    falls_on_weekend: Mapped[bool] = mapped_column(default=False)
+    calendar_note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+class StatutoryRate(Base):
+    __tablename__ = "statutory_rates"
+    parameter: Mapped[str] = mapped_column(String(80), primary_key=True)
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    value: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    unit: Mapped[str] = mapped_column(String(50))
+    note: Mapped[str] = mapped_column(String(500))
+
+class TaxParameter(Base):
+    __tablename__ = "tax_parameters"
+    parameter: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    note: Mapped[str] = mapped_column(String(500))
+
+class TaxSlab(Base):
+    __tablename__ = "tax_slabs"
+    slab_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    regime: Mapped[str] = mapped_column(String(20))
+    financial_year: Mapped[str] = mapped_column(String(12), index=True)
+    income_from: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    income_to: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_percent: Mapped[Decimal] = mapped_column(Numeric(8, 4))
+    effective_from: Mapped[date] = mapped_column(Date)
+    note: Mapped[str] = mapped_column(String(500))
+    __table_args__ = (Index("ix_tax_slabs_fy_regime_from", "financial_year", "regime", "income_from"),)
+
+class PayrollRun(Base):
+    __tablename__ = "payroll_runs"
+    run_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    pay_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    employees_paid: Mapped[int] = mapped_column(Integer)
+    total_gross: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_deductions: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_net: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_employer_contributions: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_employer_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    run_by: Mapped[str | None] = mapped_column(String(30))
+    approved_by: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
+    journal_entry_id: Mapped[str | None] = mapped_column(String(30))
+    calculation_version: Mapped[str] = mapped_column(String(50))
+
+class PayrollItem(Base):
+    __tablename__ = "payroll_items"
+    payroll_item_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("payroll_runs.run_id"), index=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    department_id: Mapped[str] = mapped_column(String(10))
+    role_id: Mapped[str] = mapped_column(String(10))
+    calendar_days: Mapped[int] = mapped_column(Integer)
+    days_employed: Mapped[int] = mapped_column(Integer)
+    lop_days: Mapped[Decimal] = mapped_column(Numeric(8, 2))
+    payable_days: Mapped[Decimal] = mapped_column(Numeric(8, 2))
+    monthly_fixed_gross: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    basic: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    hra: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    conveyance: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    medical: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    special_allowance: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    earned_fixed_pay: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    overtime_hours_paid: Mapped[Decimal] = mapped_column(Numeric(8, 2))
+    overtime_pay: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    variable_pay: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    variable_pay_type: Mapped[str | None] = mapped_column(String(50))
+    gross_pay: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    pf_employee: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    esi_employee: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    professional_tax: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    tds: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    other_deductions: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_deductions: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    net_pay: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    pf_employer: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    esi_employer: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    employer_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    calculation_note: Mapped[str | None] = mapped_column(String(500))
+    calculation_input_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    __table_args__ = (UniqueConstraint("run_id", "employee_id", name="uq_payroll_run_employee"),)
+
+class ChartOfAccount(Base):
+    __tablename__ = "chart_of_accounts"
+    account_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    account_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    account_type: Mapped[str] = mapped_column(String(20), index=True)
+    normal_balance: Mapped[str] = mapped_column(String(10))
+    parent_code: Mapped[str | None] = mapped_column(ForeignKey("chart_of_accounts.account_code"), nullable=True, index=True)
+    is_group: Mapped[bool] = mapped_column(default=False)
+    statement: Mapped[str] = mapped_column(String(30))
+    is_active: Mapped[bool] = mapped_column(default=True)
+
+class JournalEntry(Base):
+    __tablename__ = "journal_entries"
+    entry_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    entry_date: Mapped[date] = mapped_column(Date, index=True)
+    posting_period: Mapped[str] = mapped_column(String(10), index=True)
+    financial_year: Mapped[str] = mapped_column(String(12), index=True)
+    description: Mapped[str] = mapped_column(String(500))
+    source_type: Mapped[str] = mapped_column(String(40), index=True)
+    source_id: Mapped[str | None] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    total_debit: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_credit: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    reversal_of_source_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+class JournalLine(Base):
+    __tablename__ = "journal_lines"
+    line_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    entry_id: Mapped[str] = mapped_column(ForeignKey("journal_entries.entry_id", ondelete="RESTRICT"), index=True)
+    line_no: Mapped[int] = mapped_column(Integer)
+    account_code: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"), index=True)
+    debit: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    credit: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    cost_center_department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.department_id"), nullable=True)
+    line_description: Mapped[str] = mapped_column(String(500))
+    __table_args__ = (UniqueConstraint("entry_id", "line_no", name="uq_journal_line_number"),
+        CheckConstraint("debit >= 0 AND credit >= 0 AND ((debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0))", name="ck_journal_line_one_positive_side"))
+
+class Client(Base):
+    __tablename__ = "clients"
+    client_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    client_name: Mapped[str] = mapped_column(String(200), index=True)
+    industry: Mapped[str | None] = mapped_column(String(100))
+    city: Mapped[str | None] = mapped_column(String(100))
+    state_or_region: Mapped[str | None] = mapped_column(String(100))
+    country: Mapped[str] = mapped_column(String(80))
+    client_type: Mapped[str | None] = mapped_column(String(50))
+    gst_registration: Mapped[str | None] = mapped_column(String(30))
+    payment_terms_days: Mapped[int] = mapped_column(Integer)
+    payment_behaviour: Mapped[str | None] = mapped_column(String(100))
+    primary_service_line: Mapped[str | None] = mapped_column(String(100))
+    contact_email: Mapped[str | None] = mapped_column(String(255))
+    onboarded_on: Mapped[date | None] = mapped_column(Date)
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    invoices: Mapped[list["Invoice"]] = relationship(back_populates="client")
+
+class Invoice(Base):
+    __tablename__ = "invoices"
+    invoice_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    invoice_number: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(ForeignKey("clients.client_id"), index=True)
+    invoice_date: Mapped[date] = mapped_column(Date, index=True)
+    due_date: Mapped[date] = mapped_column(Date, index=True)
+    service_line_account: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"))
+    currency: Mapped[str] = mapped_column(String(3))
+    subtotal: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    gst_rate_percent: Mapped[Decimal] = mapped_column(Numeric(7,4))
+    gst_amount: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    amount_paid: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    balance_due: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    last_payment_date: Mapped[date | None] = mapped_column(Date)
+    po_number: Mapped[str | None] = mapped_column(String(60))
+    carried_in_from_prior_period: Mapped[bool] = mapped_column(default=False)
+    created_by: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime)
+    ledger_entry_id: Mapped[str | None] = mapped_column(ForeignKey("journal_entries.entry_id"), nullable=True)
+    client: Mapped[Client] = relationship(back_populates="invoices")
+    items: Mapped[list["InvoiceItem"]] = relationship(back_populates="invoice", order_by="InvoiceItem.line_no")
+    payments: Mapped[list["InvoicePayment"]] = relationship(back_populates="invoice", order_by="InvoicePayment.payment_date")
+
+class InvoiceItem(Base):
+    __tablename__ = "invoice_items"
+    invoice_item_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    invoice_id: Mapped[str] = mapped_column(ForeignKey("invoices.invoice_id", ondelete="RESTRICT"), index=True)
+    line_no: Mapped[int] = mapped_column(Integer)
+    description: Mapped[str] = mapped_column(String(500))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12,3))
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    amount: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    revenue_account: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"))
+    invoice: Mapped[Invoice] = relationship(back_populates="items")
+    __table_args__ = (UniqueConstraint("invoice_id", "line_no", name="uq_invoice_item_line"),)
+
+class InvoicePayment(Base):
+    __tablename__ = "invoice_payments"
+    payment_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    invoice_id: Mapped[str] = mapped_column(ForeignKey("invoices.invoice_id", ondelete="RESTRICT"), index=True)
+    payment_date: Mapped[date] = mapped_column(Date)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18,2))
+    payment_mode: Mapped[str] = mapped_column(String(40))
+    reference_no: Mapped[str | None] = mapped_column(String(100))
+    received_by: Mapped[str | None] = mapped_column(String(30))
+    ledger_entry_id: Mapped[str | None] = mapped_column(ForeignKey("journal_entries.entry_id"), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
+    invoice: Mapped[Invoice] = relationship(back_populates="payments")
