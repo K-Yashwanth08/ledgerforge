@@ -1,6 +1,12 @@
 # LedgerForge â€” Phase 1
 
-LedgerForge is a small FastAPI employee management foundation with a browser dashboard, SQLAlchemy data model, Alembic migrations, and a repeatable loader for the supplied organization and salary CSVs. The `/` dashboard supports employee create, view, edit, and soft-delete operations; interactive API documentation is at `/docs`.
+LedgerForge is a FastAPI employee management foundation with a browser dashboard, SQLAlchemy data model, Alembic migrations, and a repeatable loader for the supplied organization and salary CSVs. The `/` dashboard supports employee create, view, edit, and soft-delete operations; interactive API documentation is at `/docs`.
+
+## Phase 2 dashboard
+
+The responsive dashboard at `/` provides live employee and department metrics, a searchable and paginated employee directory, employee management, an organisation view, and salary structure/revision viewing. The employee list accepts optional `search`, `department_id`, and `role_id` filters alongside `limit` and `offset`. Task 6 adds attendance summaries and leave APIs. Tasks 9 and 10 add the accounting ledger and client invoicing APIs; Tasks 7 and 8 remain in progress. Salary history and attendance are sensitive; access them only where authorized.
+
+Use the existing local development command in step 9 to serve the interface. The theme toggle saves its preference in the browser. Set `window.LEDGERFORGE_API_BASE` before the dashboard script only when the API is hosted under a non-empty base path; same-origin is the default.
 
 ## Run this project in 10 steps
 
@@ -27,7 +33,9 @@ Commands below use Windows PowerShell. From Linux/macOS, replace activation with
 
 The directory and API omit date of birth and other personal/sensitive employee fields. Departed employees remain in the database for audit purposes; the directory and direct-report team endpoint show active employees by default. API deletion is a soft delete which sets an exit date and status.
 
-The company-data loader is a source refresh: a successful run replaces all seven company-owned tables, including salary revisions. Export or back up changes made through the API before running it if you need to retain them.
+The Phase 1 company-data loader is a source refresh: a successful run replaces its seven company-owned tables, including salary revisions. The separate Task 6 loader streams attendance in batches and does not overwrite records already loaded by ID. Keep the source CSV files unchanged.
+
+Phase 2 Task 9 and Task 10 loaders import chart-of-accounts/journal and client/receivables snapshots idempotently. Run `python -m scripts.load_phase2_task9` before `python -m scripts.load_phase2_task10` after applying migrations. See [Task 9 ledger notes](docs/phase2_task9.md) and [Task 10 invoicing notes](docs/phase2_task10.md) for route and behavior details.
 
 The employee form uses `GET /departments` and `GET /roles?department_id=D01` to populate validated selections. Salary APIs use inclusive effective dates. Request `GET /employees/{employee_id}/salary?effective_date=YYYY-MM-DD` to retrieve applicable components, or `GET /employees/{employee_id}/salary/revisions` for history. A salary change can be recorded with `POST /employees/{employee_id}/salary/revisions`; the service closes each previous component through the day before the new effective date and retains its history. Read `docs/salary_history.md` for the five invalid source intervals preserved as inactive rows.
 

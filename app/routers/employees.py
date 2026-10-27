@@ -21,10 +21,11 @@ def validate_refs(db: Session, department_id: str, role_id: str, manager_id: str
         if not db.get(Employee, manager_id): raise HTTPException(422, "Unknown manager_id")
 
 @router.get("", response_model=list[EmployeeOut])
-def list_employees(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), search: str | None = None, department_id: str | None = None, db: Session = Depends(get_db)):
+def list_employees(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), search: str | None = None, department_id: str | None = None, role_id: str | None = None, db: Session = Depends(get_db)):
     q = db.query(Employee).filter(Employee.exit_date.is_(None))
     if search: q = q.filter(or_(Employee.full_name.ilike(f"%{search}%"), Employee.work_email.ilike(f"%{search}%"), Employee.employee_id.ilike(f"%{search}%")))
     if department_id: q = q.filter(Employee.department_id == department_id)
+    if role_id: q = q.filter(Employee.role_id == role_id)
     return [output(e) for e in q.order_by(Employee.employee_id).offset(offset).limit(limit).all()]
 
 @router.get("/stats", include_in_schema=True)

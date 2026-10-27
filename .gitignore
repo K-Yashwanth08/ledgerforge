@@ -8,4 +8,8 @@ __pycache__/
 # Generated server logs
 *.log
 
+# Locally generated finance exports and payslip PDFs
+outputs/
+output/pdf/
+
 data/attendance.csv
