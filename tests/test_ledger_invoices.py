@@ -11,6 +11,7 @@ from app.main import app
 from app.models import (ChartOfAccount,Client,Department,Employee,Invoice,InvoicePayment,JournalEntry,
                         JournalLine,PayrollItem,PayrollRun,Role)
 from tests.test_attendance_leave import token
+from tests.auth_support import seed_test_users
 
 @pytest.fixture
 def finance_client(monkeypatch):
@@ -30,6 +31,7 @@ def finance_client(monkeypatch):
         db.add(Employee(employee_id="E1",first_name="Test",last_name="Person",full_name="Test Person",work_email="e1@example.test",hire_date=date(2020,1,1),employment_status="Active",employment_type="Permanent",department_id="D1",role_id="R1"))
         db.add_all([ChartOfAccount(account_code=c,account_name=n,account_type=t,normal_balance=bal,parent_code=None,is_group=False,statement="P&L",is_active=True) for c,n,t,bal in accounts])
         db.add(Client(client_id="C1",client_name="Test Client",country="India",payment_terms_days=30,is_active=True))
+        seed_test_users(db, {"HR1": "Admin"})
     session=Factory()
     def override():yield session
     app.dependency_overrides[get_db]=override

@@ -5,7 +5,7 @@ from ..attendance_service import apply_leave, decide_leave, list_balances
 from ..database import get_db
 from ..models import Holiday, LeaveRequest, LeaveType
 from ..schemas import LeaveBalanceOut, LeaveRequestCreate, LeaveRequestOut, LeaveTypeOut
-from ..security import current_actor, hr_actor
+from ..security import current_actor, hr_actor, require_employee_access
 
 router = APIRouter(prefix="/leave", tags=["leave"])
 
@@ -20,8 +20,7 @@ def holidays(start_date: date | None = None, end_date: date | None = None,
     return q.order_by(Holiday.holiday_date).all()
 
 def _owned_or_hr(employee_id: str, actor: dict) -> None:
-    if actor["role"] not in {"hr", "admin"} and actor["sub"] != employee_id:
-        raise HTTPException(403, "You may view only your own leave information")
+    require_employee_access(employee_id, actor)
 
 @router.get("/types", response_model=list[LeaveTypeOut])
 def leave_types(db: Session = Depends(get_db), _actor: dict = Depends(current_actor)):
@@ -36,8 +35,10 @@ def leave_balances(employee_id: str, db: Session = Depends(get_db), actor: dict 
 def leave_requests(employee_id: str | None = None, status: str | None = None,
                    limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                    db: Session = Depends(get_db), actor: dict = Depends(current_actor)):
-    if actor["role"] not in {"hr", "admin"}:
-        employee_id = actor["sub"]
+    if actor["role"] == "Employee":
+        employee_id = actor["employee_id"]
+        if not employee_id:
+            raise HTTPException(403, "Employee account is not linked to an employee record")
     q = db.query(LeaveRequest)
     if employee_id: q = q.filter(LeaveRequest.employee_id == employee_id)
     if status: q = q.filter(LeaveRequest.status.ilike(status))
@@ -45,7 +46,9 @@ def leave_requests(employee_id: str | None = None, status: str | None = None,
 
 @router.post("/requests", response_model=LeaveRequestOut, status_code=201)
 def create_leave(payload: LeaveRequestCreate, db: Session = Depends(get_db), actor: dict = Depends(current_actor)):
-    return apply_leave(db, payload, actor["sub"])
+    if actor["role"] == "Employee" and not actor.get("employee_id"):
+        raise HTTPException(403, "Employee account is not linked to an employee record")
+    return apply_leave(db, payload, actor.get("employee_id") or actor["sub"])
 
 @router.post("/requests/{request_id}/approve", response_model=LeaveRequestOut)
 def approve_leave(request_id: str, db: Session = Depends(get_db), actor: dict = Depends(hr_actor)):

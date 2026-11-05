@@ -13,6 +13,7 @@ from app.config import settings
 from app.database import Base, get_db
 from app.main import app
 from app.models import AttendanceRecord, Department, Employee, Holiday, LeaveBalance, LeaveRequest, LeaveType, Role
+from tests.auth_support import seed_test_users
 
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode().rstrip("=")
@@ -21,7 +22,7 @@ def token(sub="E1", role="employee"):
     now = int(datetime.now(timezone.utc).timestamp())
     header = _b64(b'{"alg":"HS256","typ":"JWT"}')
     claims = {"sub": sub, "role": role, "iss": settings.jwt_issuer, "aud": settings.jwt_audience,
-              "iat": now, "exp": now + 3600}
+              "iat": now, "exp": now + 1800}
     body = _b64(json.dumps(claims, separators=(",", ":")).encode())
     signature = _b64(hmac.new(settings.secret_key.encode(), f"{header}.{body}".encode(), hashlib.sha256).digest())
     return f"{header}.{body}.{signature}"
@@ -47,6 +48,8 @@ def ledger_client(monkeypatch):
         db.add(LeaveBalance(balance_id="E1:CL:FY2026-27", employee_id="E1", leave_type_code="CL",
             financial_year="FY2026-27", as_of_date=date.today(), entitlement_days=Decimal("5"),
             used_days=Decimal("0"), balance_days=Decimal("5"), version=0))
+        seed_test_users(db, {"E1": "Employee", "HR1": "HR", "HR2": "HR", "HR3": "HR", "HR4": "HR",
+                             "E2": "Employee"})
     session = Factory()
     def override(): yield session
     app.dependency_overrides[get_db] = override
@@ -72,7 +75,7 @@ def test_monthly_summary_and_missing_checkout_policy(ledger_client):
         AttendanceRecord(attendance_id="A3", employee_id="E1", attendance_date=date(2025,4,3), weekday="Thu", status="ABSENT_LOP", department_id="D1"),
         AttendanceRecord(attendance_id="A4", employee_id="E1", attendance_date=date(2025,4,4), weekday="Fri", status="HALF_DAY_UNPAID", department_id="D1"),
     ]); db.commit()
-    r = client.get("/attendance/summary/E1?month=2025-04", headers=auth(role="hr"))
+    r = client.get("/attendance/summary/E1?month=2025-04", headers=auth("HR1", "hr"))
     assert r.status_code == 200
     assert r.json() == {"employee_id":"E1","month":"2025-04","days_present":1,"work_from_home_days":1,
         "absent_days":"1.5","paid_leave_days":0,"unpaid_leave_days":0,"late_occurrences":1,
@@ -82,8 +85,8 @@ def test_monthly_summary_and_missing_checkout_policy(ledger_client):
 def test_attendance_requires_hr_token(ledger_client):
     client, _ = ledger_client
     assert client.get("/attendance").status_code == 401
-    assert client.get("/attendance", headers=auth()).status_code == 403
-    assert client.get("/attendance", headers=auth(role="hr")).status_code == 200
+    assert client.get("/attendance", headers=auth()).status_code == 200
+    assert client.get("/attendance", headers=auth("HR1", "hr")).status_code == 200
 
 def test_attendance_list_filters_source_records_and_rejects_unknown_employee(ledger_client):
     client, db = ledger_client

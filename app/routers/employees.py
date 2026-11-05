@@ -6,6 +6,7 @@ from sqlalchemy import func
 from ..database import get_db
 from ..models import Department, Employee, Role
 from ..schemas import EmployeeCreate, EmployeeOut, EmployeePatch
+from ..security import admin_actor, current_actor, hr_actor, require_employee_access
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -21,7 +22,7 @@ def validate_refs(db: Session, department_id: str, role_id: str, manager_id: str
         if not db.get(Employee, manager_id): raise HTTPException(422, "Unknown manager_id")
 
 @router.get("", response_model=list[EmployeeOut])
-def list_employees(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), search: str | None = None, department_id: str | None = None, role_id: str | None = None, db: Session = Depends(get_db)):
+def list_employees(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), search: str | None = None, department_id: str | None = None, role_id: str | None = None, db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
     q = db.query(Employee).filter(Employee.exit_date.is_(None))
     if search: q = q.filter(or_(Employee.full_name.ilike(f"%{search}%"), Employee.work_email.ilike(f"%{search}%"), Employee.employee_id.ilike(f"%{search}%")))
     if department_id: q = q.filter(Employee.department_id == department_id)
@@ -29,18 +30,19 @@ def list_employees(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, 
     return [output(e) for e in q.order_by(Employee.employee_id).offset(offset).limit(limit).all()]
 
 @router.get("/stats", include_in_schema=True)
-def employee_stats(db: Session = Depends(get_db)):
+def employee_stats(db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
     active = db.query(func.count(Employee.employee_id)).filter(Employee.exit_date.is_(None)).scalar() or 0
     return {"active_employees": active}
 
 @router.get("/{employee_id}", response_model=EmployeeOut)
-def get_employee(employee_id: str, db: Session = Depends(get_db)):
+def get_employee(employee_id: str, db: Session = Depends(get_db), actor: dict = Depends(current_actor)):
+    require_employee_access(employee_id, actor)
     e = db.get(Employee, employee_id)
     if not e: raise HTTPException(404, "Employee not found")
     return output(e)
 
 @router.post("", response_model=EmployeeOut, status_code=201)
-def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db)):
+def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
     if db.get(Employee, payload.employee_id): raise HTTPException(409, "employee_id already exists")
     validate_refs(db, payload.department_id, payload.role_id, payload.manager_id, payload.employee_id)
     e = Employee(**payload.model_dump()); db.add(e)
@@ -49,7 +51,7 @@ def create_employee(payload: EmployeeCreate, db: Session = Depends(get_db)):
     db.refresh(e); return output(e)
 
 @router.patch("/{employee_id}", response_model=EmployeeOut)
-def patch_employee(employee_id: str, payload: EmployeePatch, db: Session = Depends(get_db)):
+def patch_employee(employee_id: str, payload: EmployeePatch, db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
     e = db.get(Employee, employee_id)
     if not e: raise HTTPException(404, "Employee not found")
     changes = payload.model_dump(exclude_unset=True)
@@ -66,13 +68,13 @@ def patch_employee(employee_id: str, payload: EmployeePatch, db: Session = Depen
     db.commit(); db.refresh(e); return output(e)
 
 @router.delete("/{employee_id}", status_code=204)
-def soft_delete(employee_id: str, db: Session = Depends(get_db)):
+def soft_delete(employee_id: str, db: Session = Depends(get_db), _actor: dict = Depends(admin_actor)):
     e = db.get(Employee, employee_id)
     if not e: raise HTTPException(404, "Employee not found")
     e.exit_date = date.today(); e.employment_status = "Resigned"; db.commit()
     return None
 
 @router.get("/{employee_id}/team", response_model=list[EmployeeOut])
-def team(employee_id: str, db: Session = Depends(get_db)):
+def team(employee_id: str, db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
     if not db.get(Employee, employee_id): raise HTTPException(404, "Employee not found")
     return [output(e) for e in db.query(Employee).filter(Employee.manager_id == employee_id, Employee.exit_date.is_(None)).order_by(Employee.employee_id).all()]

@@ -1,10 +1,10 @@
 /* Dashboard views backed by the authenticated LedgerForge APIs. */
 function dashboardTokenInput() {
-  return `<div class="field full"><label for="sectionToken">Identity provider bearer token</label><input id="sectionToken" type="password" autocomplete="off" spellcheck="false" required placeholder="Paste token for this session"><small class="subtitle">LedgerForge does not issue tokens. Token is held only in this page and sent in the Authorization header.</small></div>`;
+  return "";
 }
 
 function sectionHeaders() {
-  const token = el("sectionToken")?.value.trim();
+  const token = sessionStorage.getItem("lf_access_token");
   if (!token) throw Error("Enter an identity provider bearer token.");
   return { Authorization: `Bearer ${token}` };
 }
@@ -15,11 +15,7 @@ function sectionError(box, error) {
 }
 
 function claimsHint(token) {
-  try {
-    let part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    part += "=".repeat((4 - part.length % 4) % 4);
-    return JSON.parse(atob(part)).role?.toLowerCase() || "employee";
-  } catch { return "employee"; }
+  return authUser?.role?.toLowerCase() || "employee";
 }
 
 async function renderAttendance() {
@@ -222,4 +218,47 @@ async function renderReceivables(initialTab) {
   }
   el("receivablesPrev").onclick=()=>{offset=Math.max(0,offset-50);load()};el("receivablesNext").onclick=()=>{if(canNext){offset+=50;load()}};
   await load();
+}
+async function renderFinancialReports() {
+  const today = new Date().toISOString().slice(0, 10);
+  const defaultStart = `${Number(today.slice(0, 4)) - (today.slice(5, 7) < "04" ? 1 : 0)}-04-01`;
+  content.innerHTML = `${head("Accounting", "Financial reports", "Trial balance, profit and loss, and balance sheet from posted ledger entries.")}<section class="panel"><div class="formgrid"><div class="field"><label for="reportType">Report</label><select id="reportType"><option value="trial-balance">Trial Balance</option><option value="profit-and-loss">Profit and Loss</option><option value="balance-sheet">Balance Sheet</option></select></div><div class="field"><label for="reportStart">From</label><input id="reportStart" type="date" value="${defaultStart}"></div><div class="field"><label for="reportEnd">Through</label><input id="reportEnd" type="date" value="${today}"></div>${dashboardTokenInput()}<div class="full filters"><button class="button" id="reportLoad">Load report</button><button class="button secondary" id="reportExport">Export Trial Balance CSV</button></div></div><div id="financialReportResult" class="empty">Choose a report and date range, then load it.</div></section>`;
+  const box = el("financialReportResult"), loadButton = el("reportLoad");
+  const params = () => new URLSearchParams({start_date: el("reportStart").value, end_date: el("reportEnd").value});
+  function groupTables(groups) {
+    return groups.map(group => `<h2 style="margin:20px 18px 8px">${esc(group.account_name)} <span class="meta">${esc(group.account_code)}</span></h2><div class="table-wrap"><table style="min-width:520px"><thead><tr><th>Account</th><th>Amount</th></tr></thead><tbody>${group.accounts.map(a => `<tr><td>${esc(a.account_name)} <span class="meta">${esc(a.account_code)}</span></td><td>${money(a.amount)}</td></tr>`).join("")||'<tr><td colspan="2">No posting accounts.</td></tr>'}<tr><td><strong>${esc(group.account_name)} total</strong></td><td><strong>${money(group.amount)}</strong></td></tr></tbody></table></div>`).join("");
+  }
+  function summaryCards(items) {
+    return `<section class="metrics" style="padding:16px">${items.map(([label, value]) => `<article class="card metric"><div class="metric-label">${esc(label)}</div><div class="metric-value" style="font-size:19px">${money(value)}</div></article>`).join("")}</section>`;
+  }
+  async function load() {
+    loadButton.disabled = true; box.className = "empty"; box.textContent = "Loading report…";
+    try {
+      const report = el("reportType").value;
+      const data = await request(`/reports/${report}?${params()}`, {headers: sectionHeaders()});
+      box.className = "";
+      if (report === "trial-balance") {
+        const rows = data.rows;
+        box.innerHTML = `<p class="subtitle" style="padding:0 18px">${esc(data.start_date)} through ${esc(data.end_date)} · Group totals include descendants; grand totals count posting accounts once.</p>${summaryCards([["Opening debits", data.totals.opening_debit],["Opening credits",data.totals.opening_credit],["Period debits",data.totals.period_debit],["Period credits",data.totals.period_credit],["Closing debits",data.totals.closing_debit],["Closing credits",data.totals.closing_credit]])}<div class="table-wrap"><table><thead><tr><th>Account</th><th>Opening debit</th><th>Opening credit</th><th>Period debit</th><th>Period credit</th><th>Closing debit</th><th>Closing credit</th></tr></thead><tbody>${rows.map(r=>`<tr style="${r.is_group?'font-weight:700;background:var(--surface2)':''}"><td>${r.parent_code?'&nbsp;&nbsp;&nbsp;':''}${esc(r.account_name)} <span class="meta">${esc(r.account_code)}</span></td><td>${money(r.opening_debit)}</td><td>${money(r.opening_credit)}</td><td>${money(r.period_debit)}</td><td>${money(r.period_credit)}</td><td>${money(r.closing_debit)}</td><td>${money(r.closing_credit)}</td></tr>`).join("")||'<tr><td colspan="7" class="empty">No accounts found.</td></tr>'}</tbody></table></div><p class="subtitle" style="padding:14px 18px">Trial balance ${data.balanced?'balances':'does not balance'}.</p>`;
+      } else if (report === "profit-and-loss") {
+        box.innerHTML = `<p class="subtitle" style="padding:0 18px">${esc(data.start_date)} through ${esc(data.end_date)}</p>${summaryCards([["Revenue",data.total_revenue],["Expenses",data.total_expenses],["Net profit / loss",data.net_profit]])}${groupTables(data.revenue)}${groupTables(data.expenses)}${!data.revenue.length&&!data.expenses.length?'<div class="empty">No income or expense accounts for this period.</div>':''}`;
+      } else {
+        box.innerHTML = `<p class="subtitle" style="padding:0 18px">As of ${esc(data.end_date)} · Current period ${esc(data.start_date)} through ${esc(data.end_date)}</p>${summaryCards([["Assets",data.assets_total],["Liabilities",data.liabilities_total],["Equity incl. prior earnings",data.equity_total_including_prior_profit],["Current period profit",data.current_period_profit],["Difference",data.difference]])}<p class="subtitle" style="padding:0 18px">${data.balanced?'Assets equal liabilities, equity, and current profit.':'The balance sheet does not balance.'}</p>${groupTables(data.assets)}${groupTables(data.liabilities)}${groupTables(data.equity)}`;
+      }
+    } catch (error) { sectionError(box, error); }
+    finally { loadButton.disabled = false; }
+  }
+  loadButton.onclick = load;
+  el("reportType").onchange = () => { el("reportExport").disabled = el("reportType").value !== "trial-balance"; };
+  el("reportExport").onclick = async () => {
+    const button = el("reportExport"); button.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/reports/trial-balance.csv?${params()}`, {headers: sectionHeaders()});
+      if (!response.ok) { let body={}; try {body=await response.json()} catch {} throw Error(body.detail||`Request failed (${response.status})`); }
+      const url = URL.createObjectURL(await response.blob()), a = document.createElement("a");
+      a.href = url; a.download = "ledgerforge-trial-balance.csv"; a.click(); URL.revokeObjectURL(url);
+    } catch (error) { sectionError(box, error); }
+    finally { button.disabled = false; }
+  };
+  el("reportExport").disabled = false;
 }

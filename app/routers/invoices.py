@@ -6,7 +6,7 @@ from ..invoices_service import (cancel_invoice, create_invoice, invoice_detail, 
 from ..models import Client, Invoice
 from ..schemas import (ClientCreate, ClientOut, ClientPatch, InvoiceCancel, InvoiceCreate, InvoiceOut,
     InvoiceUpdate, PaymentCreate, InvoicePaymentOut, ReceivableOut)
-from ..security import hr_actor
+from ..security import admin_actor, hr_actor
 
 router=APIRouter(tags=["clients and receivables"])
 
@@ -77,13 +77,13 @@ def send_invoice_route(invoice_id:str,db:Session=Depends(get_db),actor:dict=Depe
     except Exception:db.rollback();raise
 
 @router.post("/invoices/{invoice_id}/payments",response_model=InvoicePaymentOut,status_code=201)
-def payment_route(invoice_id:str,payload:PaymentCreate,db:Session=Depends(get_db),actor:dict=Depends(hr_actor)):
+def payment_route(invoice_id:str,payload:PaymentCreate,db:Session=Depends(get_db),actor:dict=Depends(admin_actor)):
     try:
         payment=record_payment(db,invoice_id,payload,actor["sub"]);db.commit();db.refresh(payment);return payment
     except Exception:db.rollback();raise
 
 @router.post("/invoices/{invoice_id}/cancel",response_model=InvoiceOut)
-def cancel_route(invoice_id:str,payload:InvoiceCancel,db:Session=Depends(get_db),actor:dict=Depends(hr_actor)):
+def cancel_route(invoice_id:str,payload:InvoiceCancel,db:Session=Depends(get_db),actor:dict=Depends(admin_actor)):
     try:
         cancel_invoice(db,invoice_id,payload.reason,actor["sub"]);db.commit();return invoice_detail(db,invoice_id)
     except Exception:db.rollback();raise

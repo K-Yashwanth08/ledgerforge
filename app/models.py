@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text, UniqueConstraint
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -58,6 +58,19 @@ class Employee(Base):
     department: Mapped[Department] = relationship()
     role: Mapped[Role] = relationship()
     manager: Mapped["Employee | None"] = relationship(remote_side="Employee.employee_id", foreign_keys=[manager_id])
+
+class User(Base):
+    __tablename__ = "users"
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    employee_id: Mapped[str | None] = mapped_column(ForeignKey("employees.employee_id"), nullable=True, unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    __table_args__ = (
+        CheckConstraint("role IN ('Admin', 'HR', 'Employee')", name="ck_users_role"),
+    )
 
 class EmployeeAssignment(Base):
     __tablename__ = "employee_assignments"
@@ -192,12 +205,23 @@ class StatutoryRate(Base):
     value: Mapped[Decimal] = mapped_column(Numeric(18, 4))
     unit: Mapped[str] = mapped_column(String(50))
     note: Mapped[str] = mapped_column(String(500))
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class TaxParameter(Base):
     __tablename__ = "tax_parameters"
     parameter: Mapped[str] = mapped_column(String(80), primary_key=True)
+    financial_year: Mapped[str] = mapped_column(String(12), primary_key=True, default="FY2025-26")
+    regime: Mapped[str] = mapped_column(String(20), primary_key=True, default="NEW")
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True, default=date(1900, 1, 1))
     value: Mapped[Decimal] = mapped_column(Numeric(18, 4))
     note: Mapped[str] = mapped_column(String(500))
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class TaxSlab(Base):
     __tablename__ = "tax_slabs"
@@ -209,7 +233,61 @@ class TaxSlab(Base):
     rate_percent: Mapped[Decimal] = mapped_column(Numeric(8, 4))
     effective_from: Mapped[date] = mapped_column(Date)
     note: Mapped[str] = mapped_column(String(500))
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (Index("ix_tax_slabs_fy_regime_from", "financial_year", "regime", "income_from"),)
+
+class EmployeeTaxElection(Base):
+    __tablename__ = "employee_tax_elections"
+    election_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    financial_year: Mapped[str] = mapped_column(String(12), index=True)
+    regime: Mapped[str] = mapped_column(String(20))
+    election_date: Mapped[date] = mapped_column(Date)
+    effective_from: Mapped[date] = mapped_column(Date, index=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    approval_status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.user_id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    __table_args__ = (
+        CheckConstraint("approval_status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_tax_election_status"),
+        CheckConstraint("effective_to IS NULL OR effective_to >= effective_from", name="ck_tax_election_dates"),
+        Index("ix_tax_elections_employee_period", "employee_id", "financial_year", "effective_from"),
+    )
+
+class EmployeeTaxDeclaration(Base):
+    __tablename__ = "employee_tax_declarations"
+    declaration_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    financial_year: Mapped[str] = mapped_column(String(12), index=True)
+    deduction_code: Mapped[str] = mapped_column(String(60))
+    declared_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    supporting_document_reference: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    approval_status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.user_id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    __table_args__ = (
+        CheckConstraint("declared_amount >= 0", name="ck_tax_declaration_amount"),
+        CheckConstraint("approval_status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_tax_declaration_status"),
+        Index("ix_tax_declarations_employee_fy", "employee_id", "financial_year"),
+    )
+
+class EmployeeTaxAuditEvent(Base):
+    __tablename__ = "employee_tax_audit_events"
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.employee_id"), index=True)
+    actor_user_id: Mapped[str] = mapped_column(ForeignKey("users.user_id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(30))
+    entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    action: Mapped[str] = mapped_column(String(30))
+    details: Mapped[dict] = mapped_column(JSON)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 class PayrollRun(Base):
     __tablename__ = "payroll_runs"
@@ -230,6 +308,9 @@ class PayrollRun(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
     idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
     journal_entry_id: Mapped[str | None] = mapped_column(String(30))
+    payment_journal_entry_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    reversal_entry_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    payment_reversal_entry_id: Mapped[str | None] = mapped_column(String(30), nullable=True)
     calculation_version: Mapped[str] = mapped_column(String(50))
 
 class PayrollItem(Base):
@@ -271,6 +352,19 @@ class PayrollItem(Base):
     calculation_input_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     __table_args__ = (UniqueConstraint("run_id", "employee_id", name="uq_payroll_run_employee"),)
 
+class PayrollPayment(Base):
+    __tablename__ = "payroll_payments"
+    payment_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("payroll_runs.run_id", ondelete="RESTRICT"), unique=True, index=True)
+    payment_date: Mapped[date] = mapped_column(Date)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    bank_account_code: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"))
+    payment_mode: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reference_no: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ledger_entry_id: Mapped[str] = mapped_column(ForeignKey("journal_entries.entry_id"), unique=True)
+    idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
+    created_by: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
 class ChartOfAccount(Base):
     __tablename__ = "chart_of_accounts"
     account_code: Mapped[str] = mapped_column(String(20), primary_key=True)
@@ -297,6 +391,14 @@ class JournalEntry(Base):
     reversal_of_source_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(30))
     created_at: Mapped[datetime | None] = mapped_column(DateTime)
+    __table_args__ = (
+        Index("uq_journal_expense_source", "source_id", unique=True,
+              sqlite_where=text("source_type = 'EXPENSE' AND source_id IS NOT NULL"),
+              postgresql_where=text("source_type = 'EXPENSE' AND source_id IS NOT NULL")),
+        Index("uq_journal_expense_payment_source", "source_id", unique=True,
+              sqlite_where=text("source_type = 'EXPENSE_PAYMENT' AND source_id IS NOT NULL"),
+              postgresql_where=text("source_type = 'EXPENSE_PAYMENT' AND source_id IS NOT NULL")),
+    )
 
 class JournalLine(Base):
     __tablename__ = "journal_lines"
@@ -380,3 +482,69 @@ class InvoicePayment(Base):
     ledger_entry_id: Mapped[str | None] = mapped_column(ForeignKey("journal_entries.entry_id"), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
     invoice: Mapped[Invoice] = relationship(back_populates="payments")
+
+class Vendor(Base):
+    __tablename__ = "vendors"
+    vendor_id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    vendor_name: Mapped[str] = mapped_column(String(200), index=True)
+    primary_expense_account: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"))
+    payment_terms_days: Mapped[int] = mapped_column(Integer)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    gst_registration: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    bills: Mapped[list["ExpenseBill"]] = relationship(back_populates="vendor")
+
+class ExpenseBill(Base):
+    __tablename__ = "expense_bills"
+    expense_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    expense_date: Mapped[date] = mapped_column(Date, index=True)
+    category_account: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"))
+    vendor_id: Mapped[str] = mapped_column(ForeignKey("vendors.vendor_id"), index=True)
+    bill_reference: Mapped[str] = mapped_column(String(100), index=True)
+    description: Mapped[str] = mapped_column(String(500))
+    department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.department_id"), nullable=True)
+    amount_excl_gst: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    gst_rate_percent: Mapped[Decimal] = mapped_column(Numeric(7, 4))
+    gst_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    due_date: Mapped[date] = mapped_column(Date, index=True)
+    paid_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    source_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    payment_mode: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    submitted_by: Mapped[str] = mapped_column(String(40))
+    approved_by: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ledger_entry_id: Mapped[str | None] = mapped_column(ForeignKey("journal_entries.entry_id"), nullable=True)
+    payment_ledger_entry_id: Mapped[str | None] = mapped_column(ForeignKey("journal_entries.entry_id"), nullable=True)
+    legacy_sod_violation: Mapped[bool] = mapped_column(default=False)
+    vendor: Mapped[Vendor] = relationship(back_populates="bills")
+    approval_history: Mapped[list["ExpenseApprovalHistory"]] = relationship(back_populates="bill", order_by="ExpenseApprovalHistory.history_id")
+    payments: Mapped[list["ExpensePayment"]] = relationship(back_populates="bill")
+    __table_args__ = (
+        CheckConstraint("amount_excl_gst >= 0 AND gst_amount >= 0 AND total_amount >= 0", name="ck_expense_bill_nonnegative"),
+        CheckConstraint("total_amount = amount_excl_gst + gst_amount", name="ck_expense_bill_total"),
+    )
+
+class ExpenseApprovalHistory(Base):
+    __tablename__ = "expense_approval_history"
+    history_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    expense_id: Mapped[str] = mapped_column(ForeignKey("expense_bills.expense_id", ondelete="RESTRICT"), index=True)
+    action: Mapped[str] = mapped_column(String(20))
+    actor_id: Mapped[str] = mapped_column(String(40))
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    legacy_import: Mapped[bool] = mapped_column(default=False)
+    bill: Mapped[ExpenseBill] = relationship(back_populates="approval_history")
+
+class ExpensePayment(Base):
+    __tablename__ = "expense_payments"
+    payment_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    expense_id: Mapped[str] = mapped_column(ForeignKey("expense_bills.expense_id", ondelete="RESTRICT"), unique=True, index=True)
+    payment_date: Mapped[date] = mapped_column(Date)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    cash_account_code: Mapped[str] = mapped_column(ForeignKey("chart_of_accounts.account_code"))
+    payment_mode: Mapped[str] = mapped_column(String(40))
+    reference_no: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ledger_entry_id: Mapped[str] = mapped_column(ForeignKey("journal_entries.entry_id"))
+    idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
+    bill: Mapped[ExpenseBill] = relationship(back_populates="payments")

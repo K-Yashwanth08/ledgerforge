@@ -1,10 +1,11 @@
 import re
 from pydantic import field_validator
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "sqlite:///./ledgerforge.db"
     data_dir: str = "data"
-    secret_key: str = "dev-only-change-me"
+    secret_key: str = Field(default="dev-only-change-me", validation_alias=AliasChoices("LEDGERFORGE_JWT_SECRET", "JWT_SECRET", "SECRET_KEY"))
     jwt_issuer: str = "ledgerforge-identity"
     jwt_audience: str = "ledgerforge-api"
     company_legal_name: str | None = None
