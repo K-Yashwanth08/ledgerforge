@@ -6,13 +6,13 @@ from ..models import Employee, PayrollItem, PayrollRun
 from ..payslip_pdf import build_payslip_pdf
 from ..payslip_service import get_payslip_data
 from ..schemas import PayslipRunOut
-from ..security import current_actor
+from ..security import current_actor, require_employee_access, require_linked_admin_for_employee_payroll
 
 router=APIRouter(prefix="/payslips",tags=["payslips"])
 
 def _authorize(employee_id: str, actor: dict):
-    if actor["role"] not in {"hr","admin"} and actor["sub"] != employee_id:
-        raise HTTPException(403,"You may retrieve only your own payslip")
+    require_linked_admin_for_employee_payroll(actor)
+    require_employee_access(employee_id, actor)
 
 @router.get("/employee/{employee_id}/runs", response_model=list[PayslipRunOut])
 def available_payslip_runs(employee_id: str, db: Session = Depends(get_db), actor: dict = Depends(current_actor)):

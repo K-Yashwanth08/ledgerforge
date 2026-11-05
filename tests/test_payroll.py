@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 import pytest
 from fastapi import HTTPException
@@ -9,12 +9,13 @@ from sqlalchemy.pool import StaticPool
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import (AttendanceRecord, Department, Employee, EmployeeAssignment, PayrollItem, PayrollRun, Role, SalaryComponent,
+from app.models import (AttendanceRecord, ChartOfAccount, Department, Employee, EmployeeAssignment, EmployeeTaxElection, JournalEntry, JournalLine, PayrollItem, PayrollRun, Role, SalaryComponent,
                         SalaryRevision, SalaryStructure, StatutoryRate, TaxParameter, TaxSlab)
 from app.payroll_service import _annual_tax, calculate_employee_month, run_payroll_month
 from app.payslip_pdf import build_payslip_pdf, indian_currency
 from app.payslip_service import get_payslip_data
 from tests.test_attendance_leave import token
+from tests.auth_support import seed_test_users
 
 @pytest.fixture
 def payroll_client(monkeypatch):
@@ -26,13 +27,18 @@ def payroll_client(monkeypatch):
         db.add(Role(role_id="R1",department_id="D1",role_title="Engineer",level=1,grade="L1",band_min_annual=1,band_mid_annual=2,band_max_annual=3,overtime_eligible="Y",band_year=2026))
         db.add(Employee(employee_id="E1",first_name="Test",last_name="Person",full_name="Test Person",work_email="e1@example.test",hire_date=date(2020,1,1),employment_status="Active",employment_type="Permanent",department_id="D1",role_id="R1",pf_applicable="Y",esi_applicable="N"))
         db.add(EmployeeAssignment(assignment_id="AS1",employee_id="E1",effective_from=date(2020,1,1),effective_to=None,department_id="D1",role_id="R1"))
+        db.add(EmployeeTaxElection(election_id="TE1", employee_id="E1", financial_year="FY2025-26",
+            regime="NEW", election_date=date(2025,4,1), effective_from=date(2025,4,1),
+            effective_to=None, approval_status="APPROVED", submitted_at=datetime(2025,4,1)))
+        seed_test_users(db, {"E1": "Employee", "E2": "Employee", "HR1": "HR", "HR2": "HR", "HR3": "HR", "HR4": "HR",
+                             "ADMIN1": "Admin", "ADMIN2": "Admin", "ADMIN3": "Admin"})
         db.add_all([SalaryComponent(component_id="BASIC",component_name="Basic",component_type="EARNING",taxable=True,calculation_rule="fixed",is_fixed=True),SalaryComponent(component_id="HRA",component_name="Housing",component_type="EARNING",taxable=True,calculation_rule="fixed",is_fixed=True)])
         db.flush()
         db.add(SalaryRevision(revision_id="SR1",employee_id="E1",effective_from=date(2020,1,1),revision_reason="test",previous_annual_fixed=None,new_annual_fixed=Decimal("18000"),pct_change=None,role_id_after="R1",approved_by=None,created_at=date(2020,1,1)))
         db.add_all([SalaryStructure(structure_id="SS1",employee_id="E1",component_id="BASIC",component_name="Basic",component_type="EARNING",monthly_amount=Decimal("1000"),effective_from=date(2020,1,1),effective_to=None,revision_id="SR1",is_active=True),SalaryStructure(structure_id="SS2",employee_id="E1",component_id="HRA",component_name="Housing",component_type="EARNING",monthly_amount=Decimal("500"),effective_from=date(2020,1,1),effective_to=None,revision_id="SR1",is_active=True)])
         for param,value,unit in [("PF_EMPLOYEE_RATE","12","%"),("PF_EMPLOYER_RATE","12","%"),("PF_WAGE_CEILING","15000","INR"),("ESI_EMPLOYEE_RATE","0.75","%"),("ESI_EMPLOYER_RATE","3.25","%"),("ESI_WAGE_LIMIT","21000","INR"),("PT_MONTHLY","200","INR"),("PT_GROSS_THRESHOLD","25000","INR"),("OT_MULTIPLIER","2","x"),("OT_MONTHLY_CAP_HOURS","50","hours"),("WORKING_HOURS_PER_MONTH","208","hours")]:
             db.add(StatutoryRate(parameter=param,effective_from=date(2025,4,1),value=Decimal(value),unit=unit,note="test"))
-        db.add_all([TaxParameter(parameter="standard_deduction",value=Decimal("75000"),note="test"),TaxParameter(parameter="rebate_threshold_taxable",value=Decimal("1200000"),note="test"),TaxParameter(parameter="health_education_cess_percent",value=Decimal("4"),note="test"),TaxSlab(slab_id="T1",regime="NEW",financial_year="FY2025-26",income_from=Decimal("0"),income_to=None,rate_percent=Decimal("0"),effective_from=date(2025,4,1),note="test")])
+        db.add_all([TaxParameter(parameter="standard_deduction",value=Decimal("75000"),note="test"),TaxParameter(parameter="rebate_threshold_taxable",value=Decimal("1200000"),note="test"),TaxParameter(parameter="rebate_amount",value=Decimal("0"),note="test"),TaxParameter(parameter="health_education_cess_percent",value=Decimal("4"),note="test"),TaxSlab(slab_id="T1",regime="NEW",financial_year="FY2025-26",income_from=Decimal("0"),income_to=None,rate_percent=Decimal("0"),effective_from=date(2025,4,1),note="test")])
     session=Factory()
     def override(): yield session
     app.dependency_overrides[get_db]=override
@@ -55,7 +61,8 @@ def test_payroll_uses_decimal_and_separates_calculation_components(payroll_clien
     assert result["gross_pay"]==Decimal("2171.15")
     assert result["pf_employee"]==Decimal("116.00")
     assert result["net_pay"]==Decimal("2055.15")
-    assert any("SAMPLE" in item for item in result["warnings"])
+    assert result["policy_status"] == "UNVERIFIED"
+    assert any("not independently verified" in item for item in result["warnings"])
 
 def test_fixed_pay_totals_independently_rounded_salary_components(payroll_client):
     _,db=payroll_client
@@ -179,6 +186,9 @@ def test_failed_payroll_run_does_not_persist_partial_results(payroll_client):
     db.add(Employee(employee_id="E2",first_name="Second",last_name="Person",full_name="Second Person",
         work_email="e2@example.test",hire_date=date(2020,1,1),employment_status="Active",employment_type="Permanent",
         department_id="D1",role_id="R1",pf_applicable="Y",esi_applicable="N"))
+    db.add(EmployeeTaxElection(election_id="TE2", employee_id="E2", financial_year="FY2025-26",
+        regime="NEW", election_date=date(2025,4,1), effective_from=date(2025,4,1),
+        effective_to=None, approval_status="APPROVED", submitted_at=datetime(2025,4,1)))
     db.add(SalaryRevision(revision_id="SR2",employee_id="E2",effective_from=date(2020,1,1),revision_reason="test",
         previous_annual_fixed=None,new_annual_fixed=Decimal("18000"),pct_change=None,role_id_after="R1",
         approved_by=None,created_at=date(2020,1,1)))
@@ -198,11 +208,112 @@ def test_tax_slab_revision_is_selected_by_effective_date(payroll_client):
     db.add(TaxSlab(slab_id="T2",regime="NEW",financial_year="FY2025-26",income_from=Decimal("0"),
         income_to=None,rate_percent=Decimal("100"),effective_from=date(2025,5,1),note="test revision"))
     db.commit()
-    params={"standard_deduction":Decimal("0"),"rebate_threshold_taxable":Decimal("0"),
+    params={"standard_deduction":Decimal("0"),"rebate_threshold_taxable":Decimal("0"),"rebate_amount":Decimal("0"),
             "health_education_cess_percent":Decimal("0")}
     april=_annual_tax(db,Decimal("1000"),"FY2025-26",params,date(2025,4,1))
     may=_annual_tax(db,Decimal("1000"),"FY2025-26",params,date(2025,5,1))
     assert april==Decimal("0.00") and may==Decimal("1000.00")
+
+def test_tax_calculation_uses_the_selected_regime_slabs(payroll_client):
+    _, db = payroll_client
+    db.add(TaxSlab(slab_id="OLD-TAX", regime="OLD", financial_year="FY2025-26",
+        income_from=Decimal("0"), income_to=None, rate_percent=Decimal("10"),
+        effective_from=date(2025,4,1), note="test"))
+    db.commit()
+    params={"standard_deduction":Decimal("0"),"rebate_threshold_taxable":Decimal("0"),
+        "rebate_amount":Decimal("0"),"health_education_cess_percent":Decimal("0")}
+    new_tax=_annual_tax(db,Decimal("1000"),"FY2025-26",params,date(2025,4,1),"NEW")
+    old_tax=_annual_tax(db,Decimal("1000"),"FY2025-26",params,date(2025,4,1),"OLD")
+    assert new_tax==Decimal("0.00") and old_tax==Decimal("100.00")
+
+def test_task14_configurations_are_admin_only_effective_dated_and_change_recalculation(payroll_client):
+    client, db = payroll_client
+    assert calculate_employee_month(db, "E1", "2025-04")["tds"] == Decimal("0.00")
+    assert client.get("/tax/configuration", headers=auth("HR1", "hr")).status_code == 200
+    slab_body = {"financial_year": "FY2025-26", "regime": "NEW", "effective_from": "2025-05-01",
+        "note": "Approved test policy source; isolated test configuration",
+        "slabs": [{"lower_limit": "0", "upper_limit": None, "tax_rate": "50"}]}
+    assert client.post("/tax/configuration/slabs", json=slab_body,
+        headers=auth("HR1", "hr")).status_code == 403
+    bad = {**slab_body, "slabs": [
+        {"lower_limit": "0", "upper_limit": "100", "tax_rate": "10"},
+        {"lower_limit": "99", "upper_limit": None, "tax_rate": "20"}]}
+    assert client.post("/tax/configuration/slabs", json=bad,
+        headers=auth("ADMIN1", "admin")).status_code == 422
+    assert client.post("/tax/configuration/slabs", json=slab_body,
+        headers=auth("ADMIN1", "admin")).status_code == 201
+    params = {"financial_year": "FY2025-26", "regime": "NEW", "effective_from": "2025-05-01",
+        "note": "Approved test policy source; isolated test configuration",
+        "values": {"standard_deduction": "0", "rebate_threshold_taxable": "0", "rebate_amount": "0",
+                    "health_education_cess_percent": "0"}}
+    assert client.post("/tax/configuration/parameters", json=params,
+        headers=auth("ADMIN1", "admin")).status_code == 201
+    assert calculate_employee_month(db, "E1", "2025-05")["tds"] == Decimal("750.00")
+    assert calculate_employee_month(db, "E1", "2025-04")["tds"] == Decimal("0.00")
+
+def test_task14_monthly_statutory_report_reconciles_to_payroll_run(payroll_client):
+    client, db = payroll_client
+    run_payroll_month(db, "2025-04", date(2025, 5, 1))
+    response = client.get("/reports/statutory/monthly?start_date=2025-04-01&end_date=2025-04-30",
+        headers=auth("HR1", "hr"))
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reconciled"] is True
+    assert result["policy_status"] == "UNVERIFIED"
+    assert result["official_compliance_claimed"] is False
+    assert Decimal(str(result["totals"]["pf_employee"])) == Decimal("120.00")
+    assert Decimal(str(result["totals"]["tds"])) == Decimal("0.00")
+
+def test_employee_tax_elections_and_declarations_are_owned_approved_and_audited(payroll_client):
+    client, db = payroll_client
+    existing_election = db.get(EmployeeTaxElection, "TE1")
+    existing_election.effective_to = date(2025, 4, 30)
+    db.commit()
+    election = {"financial_year": "FY2025-26", "regime": "OLD",
+        "election_date": "2025-04-01", "effective_from": "2025-05-01", "effective_to": None}
+    submitted = client.post("/tax/elections", json=election, headers=auth())
+    assert submitted.status_code == 201 and submitted.json()["approval_status"] == "PENDING"
+    election_id = submitted.json()["election_id"]
+    assert client.post("/tax/elections", json={**election, "effective_from": "2025-06-01"},
+        headers=auth()).status_code == 409
+    assert client.post("/tax/elections", json={**election, "employee_id": "E2"},
+        headers=auth()).status_code == 403
+    assert client.get("/tax/elections/E2", headers=auth()).status_code == 403
+    reviewed = client.post(f"/tax/elections/{election_id}/review",
+        json={"decision": "APPROVED", "note": "verified test election"}, headers=auth("HR1", "hr"))
+    assert reviewed.status_code == 200 and reviewed.json()["approval_status"] == "APPROVED"
+    assert reviewed.json()["reviewed_by"] == "HR1"
+
+    declaration = {"financial_year": "FY2025-26", "deduction_code": "DECLARED_DEDUCTION",
+        "declared_amount": "12345.67", "supporting_document_reference": "vault://test/ref-1"}
+    response = client.post("/tax/declarations", json=declaration, headers=auth())
+    assert response.status_code == 201 and response.json()["approval_status"] == "PENDING"
+    declaration_id = response.json()["declaration_id"]
+    assert client.post("/tax/declarations", json={**declaration, "employee_id": "E2"},
+        headers=auth()).status_code == 403
+    assert client.get("/tax/declarations/E2", headers=auth()).status_code == 403
+    approved = client.post(f"/tax/declarations/{declaration_id}/review",
+        json={"decision": "APPROVED", "note": "documents checked"}, headers=auth("HR1", "hr"))
+    assert approved.status_code == 200 and approved.json()["approval_status"] == "APPROVED"
+    audit = client.get("/tax/audit/E1", headers=auth())
+    assert audit.status_code == 200 and [event["action"] for event in audit.json()] == [
+        "SUBMITTED", "APPROVED", "SUBMITTED", "APPROVED"]
+
+def test_payroll_fails_closed_when_employee_has_no_approved_tax_election(payroll_client):
+    client, db = payroll_client
+    election = db.get(EmployeeTaxElection, "TE1")
+    db.delete(election)
+    db.commit()
+    with pytest.raises(HTTPException, match="No approved tax-regime election"):
+        calculate_employee_month(db, "E1", "2025-04")
+    assert client.get("/payroll/calculate/E1?month=2025-04", headers=auth()).status_code == 503
+
+def test_payroll_fails_closed_when_applicable_policy_is_sample(payroll_client):
+    _, db = payroll_client
+    db.query(StatutoryRate).filter_by(parameter="PF_EMPLOYEE_RATE").one().note = "SAMPLE policy input"
+    db.commit()
+    with pytest.raises(HTTPException, match="configuration is sample data"):
+        calculate_employee_month(db, "E1", "2025-04")
 
 def test_payslip_pdf_is_readable_and_matches_persisted_run(payroll_client):
     from pypdf import PdfReader
@@ -235,11 +346,11 @@ def test_payslip_owner_hr_and_invalid_identifiers(payroll_client):
     assert available.status_code==200 and available.json()[0]["run_id"]==run.run_id
     assert Decimal(str(available.json()[0]["net_pay"]))==db.query(PayrollItem).filter_by(run_id=run.run_id,employee_id="E1").one().net_pay
     assert client.get("/payslips/employee/E1/runs",headers=auth("E2")).status_code==403
-    assert client.get("/payslips/employee/E2/runs",headers=auth("E2")).status_code==404
+    assert client.get("/payslips/employee/E2/runs",headers=auth("E2")).status_code==403
     assert client.get(f"/payslips/E1/{run.run_id}",headers=auth("E2")).status_code==403
     assert client.get(f"/payslips/E1/{run.run_id}",headers=auth("HR1","hr")).status_code==200
     assert client.get("/payslips/E1/unknown",headers=auth()).status_code==404
-    assert client.get(f"/payslips/E2/{run.run_id}",headers=auth("E2")).status_code==404
+    assert client.get(f"/payslips/E2/{run.run_id}",headers=auth("E2")).status_code==403
 
 def test_indian_currency_grouping_uses_decimal():
     assert indian_currency(Decimal("123456.78"))=="INR 1,23,456.78"
@@ -269,3 +380,44 @@ def test_company_details_reject_unreplaced_placeholders_and_invalid_email():
         Settings(_env_file=None,company_legal_name="REPLACE_WITH_REGISTERED_LEGAL_NAME")
     with pytest.raises(ValidationError):
         Settings(_env_file=None,company_contact_email="not-an-email")
+
+def test_payroll_draft_process_approve_pay_and_reverse_lifecycle(payroll_client):
+    client,db=payroll_client
+    account_rows=[("1001","Bank - Test","ASSET","DEBIT"),("1300","Employee advances","ASSET","DEBIT"),
+        ("2100","Salaries Payable","LIABILITY","CREDIT"),("2110","PF Payable","LIABILITY","CREDIT"),
+        ("2120","ESI Payable","LIABILITY","CREDIT"),("2130","TDS Payable","LIABILITY","CREDIT"),
+        ("2140","PT Payable","LIABILITY","CREDIT"),("5001","Wages","EXPENSE","DEBIT"),
+        ("5002","Overtime","EXPENSE","DEBIT"),("5003","Variable pay","EXPENSE","DEBIT"),
+        ("5004","Employer PF","EXPENSE","DEBIT"),("5005","Employer ESI","EXPENSE","DEBIT")]
+    db.add_all([ChartOfAccount(account_code=code,account_name=name,account_type=kind,normal_balance=normal,
+        parent_code=None,is_group=False,statement="Test",is_active=True) for code,name,kind,normal in account_rows])
+    db.commit()
+    draft_body={"month":"2025-04","pay_date":"2025-05-01","idempotency_key":"april-run-draft-001"}
+    draft=client.post("/payroll/runs/draft",json=draft_body,headers=auth("HR1","hr"))
+    assert draft.status_code==201 and draft.json()["status"]=="DRAFT"
+    run_id=draft.json()["run_id"]
+    repeated_draft=client.post("/payroll/runs/draft",json=draft_body,headers=auth("HR1","hr"))
+    assert repeated_draft.json()["run_id"]==run_id
+    payment_body={"payment_date":"2025-05-03","bank_account_code":"1001","payment_mode":"NEFT",
+        "idempotency_key":"april-run-payment-001"}
+    assert client.post(f"/payroll/runs/{run_id}/payments",json=payment_body,headers=auth("HR1","hr")).status_code==403
+    processed=client.post(f"/payroll/runs/{run_id}/process",headers=auth("HR1","hr"))
+    assert processed.status_code==200 and processed.json()["status"]=="PROCESSED"
+    assert processed.json()["employees_paid"]==1
+    processed_again=client.post(f"/payroll/runs/{run_id}/process",headers=auth("HR1","hr"))
+    assert processed_again.json()["run_id"]==run_id and db.query(PayrollRun).count()==1
+    approved=client.post(f"/payroll/runs/{run_id}/approve",headers=auth("ADMIN1","admin"))
+    assert approved.status_code==200 and approved.json()["status"]=="APPROVED"
+    payroll_entry=db.get(JournalEntry,approved.json()["journal_entry_id"])
+    assert payroll_entry.total_debit==payroll_entry.total_credit
+    payment=client.post(f"/payroll/runs/{run_id}/payments",json=payment_body,headers=auth("ADMIN2","admin"))
+    assert payment.status_code==201 and Decimal(str(payment.json()["amount"]))==Decimal(str(approved.json()["total_net"]))
+    assert db.get(JournalEntry,payment.json()["ledger_entry_id"]).total_debit==db.get(JournalEntry,payment.json()["ledger_entry_id"]).total_credit
+    replay=client.post(f"/payroll/runs/{run_id}/payments",json=payment_body,headers=auth("ADMIN2","admin"))
+    assert replay.status_code==201 and replay.json()["ledger_entry_id"]==payment.json()["ledger_entry_id"]
+    reversed_run=client.post(f"/payroll/runs/{run_id}/reverse",json={"entry_date":"2025-05-04","reason":"Test reversal"},headers=auth("ADMIN3","admin"))
+    assert reversed_run.status_code==200 and reversed_run.json()["status"]=="REVERSED"
+    for entry_id in (reversed_run.json()["reversal_entry_id"],reversed_run.json()["payment_reversal_entry_id"]):
+        entry=db.get(JournalEntry,entry_id)
+        assert entry.total_debit==entry.total_credit
+    assert db.query(PayrollItem).count()==1 and db.query(JournalEntry).count()==4

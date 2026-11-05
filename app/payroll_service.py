@@ -1,14 +1,16 @@
 """Deterministic payroll calculation using effective-dated project inputs."""
 from calendar import monthrange
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
 from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
-from .models import (AttendanceRecord, Employee, EmployeeAssignment, PayrollItem, PayrollRun, Role,
-                     SalaryComponent, SalaryStructure, StatutoryRate, TaxParameter, TaxSlab)
+from .ledger_service import create_posted_journal, reverse_journal_entry
+from .models import (AttendanceRecord, ChartOfAccount, Employee, EmployeeAssignment, EmployeeTaxElection, JournalEntry,
+                     JournalLine, PayrollItem, PayrollPayment, PayrollRun, Role, SalaryComponent,
+                     SalaryStructure, StatutoryRate, TaxParameter, TaxSlab)
 
 CENT = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -25,31 +27,45 @@ def financial_year(d: date) -> str:
     return f"FY{y}-{(y + 1) % 100:02d}"
 
 def _rates(db: Session, d: date) -> dict[str, Decimal]:
-    rows = db.query(StatutoryRate).filter(StatutoryRate.effective_from <= d).order_by(StatutoryRate.effective_from).all()
+    rows = db.query(StatutoryRate).filter(StatutoryRate.effective_from <= d,
+        (StatutoryRate.effective_to.is_(None) | (StatutoryRate.effective_to >= d)),
+        StatutoryRate.is_active.is_(True)).order_by(StatutoryRate.effective_from).all()
     values = {}
     for row in rows: values[row.parameter] = D(row.value)
     return values
 
-def _tax_params(db: Session) -> dict[str, Decimal]:
-    return {r.parameter: D(r.value) for r in db.query(TaxParameter).all()}
+def _tax_params(db: Session, fy: str, regime: str, as_of: date) -> dict[str, Decimal]:
+    rows = db.query(TaxParameter).filter(TaxParameter.financial_year == fy,
+        TaxParameter.regime == regime, TaxParameter.effective_from <= as_of,
+        (TaxParameter.effective_to.is_(None) | (TaxParameter.effective_to >= as_of)),
+        TaxParameter.is_active.is_(True)).order_by(TaxParameter.effective_from).all()
+    selected = {}
+    for row in rows:
+        if row.parameter not in selected or row.effective_from >= selected[row.parameter].effective_from:
+            selected[row.parameter] = row
+    return {name: D(row.value) for name, row in selected.items()}
 
-def _effective_tax_slabs(db: Session, fy: str, as_of: date) -> list[TaxSlab]:
+def _effective_tax_slabs(db: Session, fy: str, as_of: date, regime: str = "NEW") -> list[TaxSlab]:
     effective_from = db.query(func.max(TaxSlab.effective_from)).filter(
-        TaxSlab.financial_year == fy, TaxSlab.regime == "NEW", TaxSlab.effective_from <= as_of
+        TaxSlab.financial_year == fy, TaxSlab.regime == regime, TaxSlab.effective_from <= as_of,
+        (TaxSlab.effective_to.is_(None) | (TaxSlab.effective_to >= as_of)), TaxSlab.is_active.is_(True)
     ).scalar()
     if effective_from is None:
         return []
-    return db.query(TaxSlab).filter_by(financial_year=fy, regime="NEW", effective_from=effective_from).order_by(
+    return db.query(TaxSlab).filter_by(financial_year=fy, regime=regime, effective_from=effective_from,
+        is_active=True).filter(TaxSlab.effective_to.is_(None) | (TaxSlab.effective_to >= as_of)).order_by(
         TaxSlab.income_from).all()
 
-def _annual_tax(db: Session, annual_salary: Decimal, fy: str, params: dict[str, Decimal], as_of: date) -> Decimal:
+def _annual_tax(db: Session, annual_salary: Decimal, fy: str, params: dict[str, Decimal], as_of: date,
+                regime: str = "NEW") -> Decimal:
     standard = params.get("standard_deduction")
     rebate_limit = params.get("rebate_threshold_taxable")
+    rebate_amount = params.get("rebate_amount")
     cess = params.get("health_education_cess_percent")
-    if standard is None or rebate_limit is None or cess is None:
+    if standard is None or rebate_limit is None or rebate_amount is None or cess is None:
         raise HTTPException(503, "Tax parameters are incomplete")
     taxable = max(ZERO, annual_salary - standard)
-    slabs = _effective_tax_slabs(db, fy, as_of)
+    slabs = _effective_tax_slabs(db, fy, as_of, regime)
     if not slabs:
         raise HTTPException(503, f"No configured tax slabs for {fy}")
     tax = ZERO
@@ -59,14 +75,15 @@ def _annual_tax(db: Session, annual_salary: Decimal, fy: str, params: dict[str, 
         portion = max(ZERO, min(taxable, high) - low)
         tax += portion * D(slab.rate_percent) / Decimal("100")
     if taxable <= rebate_limit:
-        tax = ZERO
+        tax = max(ZERO, tax - min(tax, rebate_amount))
     else:
         tax = min(tax, taxable - rebate_limit)  # configured marginal-relief cap
     return round_money(tax * (Decimal("1") + cess / Decimal("100")))
 
 def calculate_employee_month(db: Session, employee_id: str, month: str,
                              variable_pay: Decimal = ZERO, variable_pay_type: str | None = None,
-                             other_deductions: Decimal = ZERO, *, capture_inputs: bool = False) -> dict:
+                             other_deductions: Decimal = ZERO, *, capture_inputs: bool = False,
+                             tax_regime: str | None = None) -> dict:
     try:
         year, mon = map(int, month.split("-"))
         start = date(year, mon, 1)
@@ -76,6 +93,23 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
     employee = db.get(Employee, employee_id)
     if not employee:
         raise HTTPException(404, "Employee not found")
+    fy = financial_year(start)
+    election = None
+    if tax_regime is None:
+        elections = db.query(EmployeeTaxElection).filter(
+            EmployeeTaxElection.employee_id == employee_id,
+            EmployeeTaxElection.financial_year == fy,
+            EmployeeTaxElection.effective_from <= start,
+            (EmployeeTaxElection.effective_to.is_(None) | (EmployeeTaxElection.effective_to >= start)),
+            EmployeeTaxElection.approval_status == "APPROVED",
+        ).order_by(EmployeeTaxElection.effective_from.desc(),
+                   EmployeeTaxElection.submitted_at.desc()).all()
+        if not elections:
+            raise HTTPException(503, f"No approved tax-regime election for {employee_id} in {fy}")
+        if len(elections) != 1:
+            raise HTTPException(503, f"Conflicting approved tax-regime elections for {employee_id} in {fy}")
+        election = elections[0]
+        tax_regime = election.regime
     active_start = max(start, employee.hire_date)
     active_end = min(end, employee.exit_date or end)
     days_employed = max(0, (active_end - active_start).days + 1)
@@ -108,7 +142,9 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
     special = earned - basic - hra - conveyance - medical
     if special < 0:
         raise HTTPException(422, "Configured salary components do not match the supported payroll breakdown")
-    rate_rows = db.query(StatutoryRate).filter(StatutoryRate.effective_from <= start).order_by(
+    rate_rows = db.query(StatutoryRate).filter(StatutoryRate.effective_from <= start,
+        (StatutoryRate.effective_to.is_(None) | (StatutoryRate.effective_to >= start)),
+        StatutoryRate.is_active.is_(True)).order_by(
         StatutoryRate.effective_from, StatutoryRate.parameter).all()
     selected_rate_rows = {}
     for rate_row in rate_rows:
@@ -157,17 +193,29 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
     esi_ee = round_money(gross * rates["ESI_EMPLOYEE_RATE"] / 100) if eligible_esi else ZERO
     esi_er = round_money(gross * rates["ESI_EMPLOYER_RATE"] / 100) if eligible_esi else ZERO
     pt = rates["PT_MONTHLY"] if gross >= rates["PT_GROSS_THRESHOLD"] else ZERO
-    tax_params = _tax_params(db)
+    tax_params = _tax_params(db, fy, tax_regime, start)
+    applicable_slabs = _effective_tax_slabs(db, fy, start, tax_regime)
+    tax_param_notes = [row[0] for row in db.query(TaxParameter.note).filter(
+        TaxParameter.financial_year == fy, TaxParameter.regime == tax_regime,
+        TaxParameter.effective_from <= start,
+        (TaxParameter.effective_to.is_(None) | (TaxParameter.effective_to >= start)),
+        TaxParameter.is_active.is_(True)).all()]
+    applicable_policy_notes = ([row.note for row in selected_rate_rows.values()] + tax_param_notes +
+                               [row.note for row in applicable_slabs])
+    sample_policy = any("sample" in note.casefold() or "training" in note.casefold()
+                        for note in applicable_policy_notes)
+    if sample_policy:
+        raise HTTPException(503, "Applicable tax/statutory configuration is sample data; payroll calculation is blocked")
     annual_salary = monthly_fixed * Decimal("12")
-    annual_tax = _annual_tax(db, annual_salary, financial_year(start), tax_params, start)
+    annual_tax = _annual_tax(db, annual_salary, fy, tax_params, start, tax_regime)
     tds = round_money(annual_tax / Decimal("12"))
     other = round_money(other_deductions)
     deductions = pf_ee + esi_ee + pt + tds + other
     net = gross - deductions
-    warnings = ["Tax slabs and statutory rates are explicitly marked SAMPLE; this is not a statutory payroll result.",
+    warnings = ["Tax/statutory policy provenance is not independently verified; do not treat this as statutory compliance.",
                 "No variable-pay source dataset is supplied; variable pay defaults to zero unless explicitly provided.",
                 "No employee-loan/advance dataset is supplied; other deductions default to zero unless explicitly provided.",
-                "Tax regime and individual tax declarations are not supplied; the configured NEW regime is used."]
+                "Approved declarations are stored but are not deducted until authoritative deduction treatment is supplied."]
     result = {"employee_id": employee_id, "month": month, "period_start": start, "period_end": end,
         "calendar_days": calendar_days, "days_employed": days_employed, "lop_days": lop, "payable_days": payable,
         "monthly_fixed_gross": monthly_fixed, "basic": basic, "hra": hra, "conveyance": conveyance,
@@ -177,9 +225,10 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
         "esi_employee": esi_ee, "professional_tax": pt, "tds": tds, "other_deductions": other,
         "total_deductions": deductions, "net_pay": net, "pf_employer": pf_er, "esi_employer": esi_er,
         "employer_cost": gross + pf_er + esi_er, "warnings": warnings,
+        "policy_status": "UNVERIFIED",
         "calculation_note": "Calendar-day LOP; configured overtime policy; sample reference rates only."}
     if capture_inputs:
-        tax_slabs = _effective_tax_slabs(db, financial_year(start), start)
+        tax_slabs = _effective_tax_slabs(db, fy, start, tax_regime)
         result["_input_snapshot"] = {
             "calculation_version": VERSION,
             "rounding": {"mode": "ROUND_HALF_UP", "currency_decimal_places": 2},
@@ -206,6 +255,12 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
                                        "value": format(D(row.value), "f"), "unit": row.unit, "note": row.note}
                                 for name, row in selected_rate_rows.items()},
             "tax_parameters": {name: format(value, "f") for name, value in tax_params.items()},
+            "tax_configuration": {"financial_year": fy, "regime": tax_regime, "as_of": start.isoformat()},
+            "tax_election": ({"election_id": election.election_id,
+                              "election_date": election.election_date.isoformat(),
+                              "effective_from": election.effective_from.isoformat(),
+                              "approval_status": election.approval_status}
+                             if election else {"source": "explicit internal override"}),
             "tax_slabs": [{"slab_id": slab.slab_id, "regime": slab.regime,
                            "financial_year": slab.financial_year, "income_from": format(D(slab.income_from), "f"),
                            "income_to": format(D(slab.income_to), "f") if slab.income_to is not None else None,
@@ -215,9 +270,10 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
             "manual_inputs": {"variable_pay": format(D(variable_pay), "f"),
                               "variable_pay_type": variable_pay_type,
                               "other_deductions": format(D(other_deductions), "f")},
-            "policy": {"loss_of_pay": "calendar days; unpaid leave and absent statuses; half-day unpaid=0.5",
+            "policy": {"policy_status": "UNVERIFIED",
+                       "loss_of_pay": "calendar days; unpaid leave and absent statuses; half-day unpaid=0.5",
                        "overtime": "effective role eligibility; configured multiplier, monthly cap, and hours divisor",
-                       "tax_regime": "NEW", "source_values_may_be_sample": any(
+                       "tax_regime": tax_regime, "source_values_may_be_sample": any(
                            "sample" in str(row.note).casefold() for row in selected_rate_rows.values()) or
                            any("sample" in str(slab.note).casefold() for slab in tax_slabs) or
                            any("sample" in str(value).casefold() for value in
@@ -225,15 +281,29 @@ def calculate_employee_month(db: Session, employee_id: str, month: str,
         }
     return result
 
-def run_payroll_month(db: Session, month: str, pay_date: date) -> tuple[PayrollRun, list[str]]:
+def run_payroll_month(db: Session, month: str, pay_date: date, *, draft_run_id: str | None = None,
+                      run_by: str | None = None) -> tuple[PayrollRun, list[str]]:
     try:
         year, mon = map(int, month.split("-")); start = date(year, mon, 1); end = date(year, mon, monthrange(year, mon)[1])
     except (ValueError, TypeError):
         raise HTTPException(422, "month must use YYYY-MM format")
-    key = f"{VERSION}:{month}"
+    draft = db.get(PayrollRun, draft_run_id) if draft_run_id else None
+    if draft_run_id and (not draft or draft.status != "DRAFT"):
+        if draft and draft.status in {"PROCESSED", "APPROVED", "PAID"}:
+            return draft, ["Existing idempotent payroll run returned; no recalculation was performed."]
+        raise HTTPException(409, "Payroll draft is missing or cannot be processed in its current status")
+    if draft and (draft.period_start != start or draft.period_end.day != monthrange(year, mon)[1]):
+        raise HTTPException(409, "Payroll draft period does not match the requested month")
+    period_run = db.query(PayrollRun).filter(PayrollRun.period_start == start,
+        PayrollRun.period_end == date(year, mon, monthrange(year, mon)[1])).first()
+    if period_run and (not draft or period_run.run_id != draft.run_id):
+        if draft:
+            raise HTTPException(409, f"Payroll period already has run {period_run.run_id}; draft was preserved")
+        return period_run, ["Existing payroll period run returned; no recalculation or duplicate posting was performed."]
+    key = draft.idempotency_key if draft else f"{VERSION}:{month}"
     existing = db.query(PayrollRun).filter_by(idempotency_key=key).first()
-    if existing:
-        return existing, ["Existing immutable payroll calculation returned for this month."]
+    if existing and (not draft or existing.run_id != draft.run_id):
+        return existing, ["Existing idempotent payroll calculation returned for this month."]
     employees = db.query(Employee).filter(Employee.hire_date <= end,
         (Employee.exit_date.is_(None) | (Employee.exit_date >= start))).order_by(Employee.employee_id).all()
     if not employees:
@@ -247,16 +317,24 @@ def run_payroll_month(db: Session, month: str, pay_date: date) -> tuple[PayrollR
     if not calculations:
         raise HTTPException(422, "No employees have applicable salary structures for this month")
     version_tag = f"V{VERSION.rsplit('-', 1)[-1]}"
-    run_id = f"LF-{month.replace('-', '')}-{version_tag}"
+    run_id = draft.run_id if draft else f"LF-{month.replace('-', '')}-{version_tag}"
     totals = {k: sum((r[k] for r in calculations), ZERO) for k in
         ("gross_pay", "total_deductions", "net_pay", "employer_cost", "pf_employer", "esi_employer")}
-    run = PayrollRun(run_id=run_id, period_start=start, period_end=end, pay_date=pay_date,
+    values = dict(period_start=start, period_end=end, pay_date=pay_date,
         employees_paid=len(calculations), total_gross=totals["gross_pay"], total_deductions=totals["total_deductions"],
         total_net=totals["net_pay"], total_employer_contributions=totals["pf_employer"]+totals["esi_employer"],
-        total_employer_cost=totals["employer_cost"], status="CALCULATED", run_by=None, approved_by=None,
-        created_at=None, approved_at=None, idempotency_key=key, journal_entry_id=None, calculation_version=VERSION)
+        total_employer_cost=totals["employer_cost"], status="PROCESSED", approved_by=None,
+        approved_at=None, idempotency_key=key, journal_entry_id=None, calculation_version=VERSION)
+    if draft:
+        run = draft
+        for field, value in values.items(): setattr(run, field, value)
+        if run_by: run.run_by = run_by
+    else:
+        run = PayrollRun(run_id=run_id, **values, run_by=run_by,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None))
     try:
-        db.add(run); db.flush()
+        if not draft: db.add(run)
+        db.flush()
         db.add_all([PayrollItem(payroll_item_id=f"{run_id}:{r['employee_id']}", run_id=run_id,
             employee_id=r["employee_id"], period_start=start, period_end=end, department_id=db.get(Employee,r["employee_id"]).department_id,
             role_id=db.get(Employee,r["employee_id"]).role_id, calculation_note=r["calculation_note"],
@@ -267,3 +345,82 @@ def run_payroll_month(db: Session, month: str, pay_date: date) -> tuple[PayrollR
         db.rollback(); raise
     warnings = sorted({w for r in calculations for w in r["warnings"]})
     return run, warnings
+
+
+def _cash_account(db: Session, code: str) -> ChartOfAccount:
+    account = db.get(ChartOfAccount, code)
+    if (not account or not account.is_active or account.is_group or account.account_type != "ASSET"
+            or not any(term in account.account_name.casefold() for term in ("bank", "cash"))):
+        raise HTTPException(422, "Select an active cash or bank posting account from the chart of accounts")
+    return account
+
+
+def record_payroll_payment(db: Session, run: PayrollRun, payload, paid_by: str):
+    replay = db.query(PayrollPayment).filter_by(idempotency_key=payload.idempotency_key).first()
+    if replay:
+        same = (replay.run_id == run.run_id and replay.payment_date == payload.payment_date
+                and replay.bank_account_code == payload.bank_account_code
+                and replay.payment_mode == payload.payment_mode and replay.reference_no == payload.reference_no
+                and replay.amount == run.total_net)
+        if not same: raise HTTPException(409, "Idempotency key was already used for a different payroll payment")
+        return replay
+    if run.status != "APPROVED": raise HTTPException(409, "Only an approved payroll run can be paid")
+    if not run.journal_entry_id: raise HTTPException(409, "Payroll must be posted to the ledger before payment")
+    if db.query(PayrollPayment).filter_by(run_id=run.run_id).first():
+        raise HTTPException(409, "Payroll run already has a payment")
+    bank = _cash_account(db, payload.bank_account_code)
+    payable_rows = db.query(ChartOfAccount).filter_by(account_name="Salaries Payable",
+        account_type="LIABILITY", is_group=False, is_active=True).all()
+    if len(payable_rows) != 1: raise HTTPException(503, "Chart of accounts must define one active Salaries Payable posting account")
+    payable = payable_rows[0]
+    amount = D(run.total_net)
+    if amount <= ZERO: raise HTTPException(422, "Payroll net pay must be positive before payment")
+    lines = [{"account_code": payable.account_code, "debit": amount, "credit": ZERO,
+              "line_description": f"Net salary payment {run.run_id}"},
+             {"account_code": bank.account_code, "debit": ZERO, "credit": amount,
+              "line_description": f"Salary bank payment {run.run_id}"}]
+    entry = create_posted_journal(db, entry_date=payload.payment_date, description=f"Salary payment {run.run_id}",
+        source_type="SALARY_PAYMENT", source_id=run.run_id, lines=lines, created_by=paid_by)
+    if entry.source_type != "SALARY_PAYMENT" or entry.source_id != run.run_id:
+        raise HTTPException(409, "Existing salary payment journal references a different payroll run")
+    actual = {}
+    for line in db.query(JournalLine).filter_by(entry_id=entry.entry_id).all():
+        actual[line.account_code] = (D(line.debit), D(line.credit))
+    expected = {payable.account_code: (amount, ZERO), bank.account_code: (ZERO, amount)}
+    if actual != expected or entry.total_debit != entry.total_credit:
+        raise HTTPException(409, "Existing salary payment journal does not match the approved payroll amount")
+    payment = PayrollPayment(payment_id=f"PP-{uuid4().hex[:28].upper()}", run_id=run.run_id,
+        payment_date=payload.payment_date, amount=amount, bank_account_code=bank.account_code,
+        payment_mode=payload.payment_mode, reference_no=payload.reference_no,
+        ledger_entry_id=entry.entry_id, idempotency_key=payload.idempotency_key, created_by=paid_by)
+    db.add(payment)
+    run.payment_journal_entry_id = entry.entry_id
+    run.pay_date = payload.payment_date
+    run.status = "PAID"
+    return payment
+
+
+def reverse_payroll_run(db: Session, run: PayrollRun, entry_date: date, reason: str, reversed_by: str):
+    if run.status == "REVERSED":
+        existing = db.get(JournalEntry, run.reversal_entry_id) if run.reversal_entry_id else None
+        if existing: return existing
+        raise HTTPException(409, "Payroll run reversal is incomplete; reconcile its existing journal links")
+    if run.status not in {"APPROVED", "PAID", "POSTED - PAYMENT PENDING", "POSTED"}:
+        raise HTTPException(409, "Only an approved or posted payroll run can be reversed")
+    payroll_entry = db.get(JournalEntry, run.journal_entry_id) if run.journal_entry_id else None
+    if not payroll_entry: raise HTTPException(409, "Payroll run has no linked payroll journal entry")
+    if run.status == "PAID":
+        payment_entry = db.get(JournalEntry, run.payment_journal_entry_id) if run.payment_journal_entry_id else None
+        if not payment_entry:
+            payment_entry = db.query(JournalEntry).filter_by(source_type="SALARY_PAYMENT",
+                source_id=run.run_id, status="POSTED").first()
+        if not payment_entry: raise HTTPException(409, "Paid payroll run has no salary payment journal")
+        payment_reversal = reverse_journal_entry(db, payment_entry.entry_id, entry_date,
+            f"Payroll run {run.run_id}: {reason}", reversed_by)
+        run.payment_journal_entry_id = payment_entry.entry_id
+        run.payment_reversal_entry_id = payment_reversal.entry_id
+    reversal = reverse_journal_entry(db, payroll_entry.entry_id, entry_date,
+        f"Payroll run {run.run_id}: {reason}", reversed_by)
+    run.reversal_entry_id = reversal.entry_id
+    run.status = "REVERSED"
+    return reversal

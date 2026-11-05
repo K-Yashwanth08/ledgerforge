@@ -1,6 +1,33 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=1, max_length=128)
+
+class UserCreate(BaseModel):
+    employee_id: str | None = Field(default=None, max_length=20)
+    username: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=12, max_length=128)
+    role: str
+
+class UserPatch(BaseModel):
+    username: str | None = Field(default=None, min_length=3, max_length=255)
+    role: str | None = None
+    is_active: bool | None = None
+
+class UserPasswordChange(BaseModel):
+    password: str = Field(min_length=12, max_length=128)
+
+class UserOut(BaseModel):
+    user_id: str
+    employee_id: str | None
+    username: str
+    role: str
+    is_active: bool
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
 class DepartmentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -221,6 +248,12 @@ class PayrollRunOut(BaseModel):
     total_employer_contributions: Decimal
     total_employer_cost: Decimal
     status: str
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    journal_entry_id: str | None = None
+    payment_journal_entry_id: str | None = None
+    reversal_entry_id: str | None = None
+    payment_reversal_entry_id: str | None = None
     calculation_version: str
     warnings: list[str] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
@@ -237,6 +270,18 @@ class PayslipRunOut(BaseModel):
 class PayrollRunCreate(BaseModel):
     month: str = Field(pattern=r"^\d{4}-\d{2}$")
     pay_date: date
+
+class PayrollRunDraftCreate(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    pay_date: date
+    idempotency_key: str = Field(min_length=8, max_length=100)
+
+class PayrollPaymentCreate(BaseModel):
+    payment_date: date
+    bank_account_code: str = Field(min_length=1, max_length=20)
+    payment_mode: str = Field(min_length=1, max_length=40)
+    reference_no: str | None = Field(default=None, max_length=100)
+    idempotency_key: str = Field(min_length=8, max_length=100)
 
 class JournalLineCreate(BaseModel):
     account_code: str
@@ -410,3 +455,80 @@ class ReceivableOut(BaseModel):
     client_id: str
     client_name: str
     outstanding_balance: Decimal
+
+class VendorCreate(BaseModel):
+    vendor_id: str = Field(min_length=1, max_length=30)
+    vendor_name: str = Field(min_length=1, max_length=200)
+    primary_expense_account: str = Field(min_length=1, max_length=20)
+    payment_terms_days: int = Field(ge=0, le=3650)
+    city: str | None = Field(default=None, max_length=100)
+    gst_registration: str | None = Field(default=None, max_length=40)
+    is_active: bool = True
+
+class VendorPatch(BaseModel):
+    vendor_name: str | None = Field(default=None, min_length=1, max_length=200)
+    primary_expense_account: str | None = Field(default=None, min_length=1, max_length=20)
+    payment_terms_days: int | None = Field(default=None, ge=0, le=3650)
+    city: str | None = Field(default=None, max_length=100)
+    gst_registration: str | None = Field(default=None, max_length=40)
+    is_active: bool | None = None
+
+class VendorOut(BaseModel):
+    vendor_id: str
+    vendor_name: str
+    primary_expense_account: str
+    payment_terms_days: int
+    city: str | None
+    gst_registration: str | None
+    is_active: bool
+    model_config = ConfigDict(from_attributes=True)
+
+class ExpenseBillCreate(BaseModel):
+    vendor_id: str = Field(min_length=1, max_length=30)
+    expense_date: date
+    due_date: date
+    bill_reference: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=500)
+    category_account: str = Field(min_length=1, max_length=20)
+    department_id: str | None = Field(default=None, max_length=10)
+    amount_excl_gst: Decimal = Field(ge=0, max_digits=18, decimal_places=2)
+    gst_rate_percent: Decimal = Field(ge=0, le=100, max_digits=7, decimal_places=4)
+
+class ExpenseDuplicateCheck(BaseModel):
+    vendor_id: str
+    bill_reference: str
+    expense_date: date
+    total_amount: Decimal = Field(ge=0, max_digits=18, decimal_places=2)
+
+class ExpensePaymentCreate(BaseModel):
+    payment_date: date
+    payment_mode: str = Field(min_length=1, max_length=40)
+    cash_account_code: str = Field(min_length=1, max_length=20)
+    reference_no: str | None = Field(default=None, max_length=100)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+
+class ExpenseBillOut(BaseModel):
+    expense_id: str
+    expense_date: date
+    category_account: str
+    vendor_id: str
+    bill_reference: str
+    description: str
+    department_id: str | None
+    amount_excl_gst: Decimal
+    gst_rate_percent: Decimal
+    gst_amount: Decimal
+    total_amount: Decimal
+    due_date: date
+    paid_date: date | None
+    status: str
+    source_status: str | None
+    payment_mode: str | None
+    submitted_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    ledger_entry_id: str | None
+    payment_ledger_entry_id: str | None
+    legacy_sod_violation: bool
+    approval_history: list[dict] = Field(default_factory=list)
+    model_config = ConfigDict(from_attributes=True)

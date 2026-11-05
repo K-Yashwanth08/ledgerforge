@@ -95,5 +95,4 @@ def post_payroll_run(db:Session,run_id:str,posted_by:str):
     entry=_entry(db,entry_date=date_for_entry,description=f"Payroll run {run_id}",source_type="PAYROLL_RUN",
         source_id=run_id,lines=lines,created_by=posted_by)
     run.journal_entry_id=entry.entry_id
-    run.status="POSTED"
     return entry

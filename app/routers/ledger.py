@@ -3,9 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..ledger_service import account_balance, create_journal_entry, post_payroll_run, reverse_journal_entry
-from ..models import ChartOfAccount, JournalEntry, JournalLine
+from ..models import ChartOfAccount, JournalEntry, JournalLine, PayrollRun
 from ..schemas import AccountBalanceOut, AccountOut, JournalEntryCreate, JournalEntryOut, ReversalCreate
-from ..security import hr_actor
+from ..security import admin_actor, hr_actor
 
 router=APIRouter(prefix="/ledger",tags=["accounting ledger"])
 
@@ -48,14 +48,14 @@ def entry_detail(entry_id:str,db:Session=Depends(get_db),_actor:dict=Depends(hr_
     return _out(db,entry)
 
 @router.post("/journal-entries",response_model=JournalEntryOut,status_code=201)
-def create_entry(payload:JournalEntryCreate,db:Session=Depends(get_db),actor:dict=Depends(hr_actor)):
+def create_entry(payload:JournalEntryCreate,db:Session=Depends(get_db),actor:dict=Depends(admin_actor)):
     try:
         entry=create_journal_entry(db,payload,actor["sub"]);db.commit();db.refresh(entry);return _out(db,entry)
     except Exception:
         db.rollback();raise
 
 @router.post("/journal-entries/{entry_id}/reverse",response_model=JournalEntryOut,status_code=201)
-def reverse_entry(entry_id:str,payload:ReversalCreate,db:Session=Depends(get_db),actor:dict=Depends(hr_actor)):
+def reverse_entry(entry_id:str,payload:ReversalCreate,db:Session=Depends(get_db),actor:dict=Depends(admin_actor)):
     try:
         entry=reverse_journal_entry(db,entry_id,payload.entry_date,payload.reason,actor["sub"])
         db.commit();db.refresh(entry);return _out(db,entry)
@@ -63,8 +63,13 @@ def reverse_entry(entry_id:str,payload:ReversalCreate,db:Session=Depends(get_db)
         db.rollback();raise
 
 @router.post("/payroll-runs/{run_id}/post",response_model=JournalEntryOut,status_code=201)
-def post_payroll(run_id:str,db:Session=Depends(get_db),actor:dict=Depends(hr_actor)):
+def post_payroll(run_id:str,db:Session=Depends(get_db),actor:dict=Depends(admin_actor)):
     try:
+        run=db.get(PayrollRun,run_id)
+        if not run:raise HTTPException(404,"Payroll run not found")
+        existing=db.query(JournalEntry).filter_by(source_type="PAYROLL_RUN",source_id=run_id,status="POSTED").first()
+        if not existing and run.status!="APPROVED":
+            raise HTTPException(409,"Payroll must be approved before it can be posted to the ledger")
         entry=post_payroll_run(db,run_id,actor["sub"]);db.commit();db.refresh(entry);return _out(db,entry)
     except Exception:
         db.rollback();raise

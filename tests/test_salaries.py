@@ -8,15 +8,20 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import Department, Role, Employee, SalaryComponent, SalaryRevision, SalaryStructure
+from app.config import settings
+from app.models import User
+from tests.test_attendance_leave import token
 
 @pytest.fixture
-def salary_db():
+def salary_db(monkeypatch):
+    monkeypatch.setattr(settings,"secret_key","test-only-signing-secret-at-least-32-bytes")
     engine=create_engine("sqlite://",connect_args={"check_same_thread":False},poolclass=StaticPool)
     Base.metadata.create_all(engine); Factory=sessionmaker(bind=engine,autoflush=False)
     with Factory.begin() as db:
         db.add(Department(department_id="D1",department_name="Engineering",cost_center="CC1"))
         db.add(Role(role_id="R1",department_id="D1",role_title="Engineer",level=1,grade="L1",band_min_annual=1,band_mid_annual=2,band_max_annual=3,overtime_eligible="N",band_year=2026))
         db.add(Employee(employee_id="E1",first_name="Test",last_name="Employee",full_name="Test Employee",work_email="test@example.test",hire_date=date(2020,1,1),employment_status="Active",employment_type="Permanent",department_id="D1",role_id="R1"))
+        db.add(User(user_id="TEST-ADMIN",employee_id=None,username="test-admin@example.test",password_hash="test",role="Admin",is_active=True))
         db.add_all([SalaryComponent(component_id="BASIC",component_name="Basic",component_type="EARNING",taxable=True,calculation_rule="fixed",is_fixed=True),SalaryComponent(component_id="HRA",component_name="Housing",component_type="EARNING",taxable=True,calculation_rule="half basic",is_fixed=True)])
         db.flush()
         db.add(SalaryRevision(revision_id="SR-OLD",employee_id="E1",effective_from=date(2023,1,1),revision_reason="Joining",previous_annual_fixed=None,new_annual_fixed=Decimal("18000.00"),pct_change=None,role_id_after="R1",approved_by=None,created_at=date(2023,1,1)))
@@ -24,7 +29,7 @@ def salary_db():
     db=Factory()
     def override(): yield db
     app.dependency_overrides[get_db]=override
-    with TestClient(app) as client: yield client,db
+    with TestClient(app,headers={"Authorization":f"Bearer {token('TEST-ADMIN','admin')}"}) as client: yield client,db
     app.dependency_overrides.clear(); db.close(); Base.metadata.drop_all(engine); engine.dispose()
 
 def revision_body(effective="2024-01-01"):

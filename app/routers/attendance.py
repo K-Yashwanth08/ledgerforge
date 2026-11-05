@@ -5,7 +5,7 @@ from ..attendance_service import get_monthly_summary
 from ..database import get_db
 from ..models import AttendanceRecord, Employee
 from ..schemas import AttendanceOut, AttendanceSummaryOut
-from ..security import hr_actor
+from ..security import current_actor, require_employee_access
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -13,9 +13,15 @@ router = APIRouter(prefix="/attendance", tags=["attendance"])
 def list_attendance(start_date: date | None = None, end_date: date | None = None,
                     employee_id: str | None = None, department_id: str | None = None,
                     limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
-                    db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
+                    db: Session = Depends(get_db), actor: dict = Depends(current_actor)):
     if start_date and end_date and end_date < start_date:
         raise HTTPException(422, "end_date must be on or after start_date")
+    if actor["role"] == "Employee":
+        if employee_id and employee_id != actor["employee_id"]:
+            require_employee_access(employee_id, actor)
+        employee_id = actor["employee_id"]
+        if not employee_id:
+            raise HTTPException(403, "Employee account is not linked to an employee record")
     if employee_id and not db.get(Employee, employee_id):
         raise HTTPException(404, "Employee not found")
     q = db.query(AttendanceRecord)
@@ -27,5 +33,6 @@ def list_attendance(start_date: date | None = None, end_date: date | None = None
 
 @router.get("/summary/{employee_id}", response_model=AttendanceSummaryOut)
 def attendance_summary(employee_id: str, month: str = Query(pattern=r"^\d{4}-\d{2}$"),
-                       db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
+                       db: Session = Depends(get_db), actor: dict = Depends(current_actor)):
+    require_employee_access(employee_id, actor)
     return get_monthly_summary(db, employee_id, month)

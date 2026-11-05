@@ -32,7 +32,8 @@ def main():
         rate_count=0
         for batch in chunks("statutory_rates.csv", lambda r: {**r,"effective_from":date.fromisoformat(r["effective_from"]),"value":dec(r["value"])}): rate_count += conflict_safe_insert(db,StatutoryRate,batch)
         tax_count=0
-        for batch in chunks("tax_parameters.csv",lambda r:{**r,"value":dec(r["value"])}): tax_count += conflict_safe_insert(db,TaxParameter,batch)
+        for batch in chunks("tax_parameters.csv",lambda r:{**r,"value":dec(r["value"]),
+            "financial_year":"FY2025-26","regime":"NEW","effective_from":date(1900,1,1)}): tax_count += conflict_safe_insert(db,TaxParameter,batch)
         slab_count=0
         for batch in chunks("tax_slabs.csv",lambda r:{**r,"income_from":dec(r["income_from"]),"income_to":dec(r["income_to"]) if r["income_to"] else None,"rate_percent":dec(r["rate_percent"]),"effective_from":date.fromisoformat(r["effective_from"])}): slab_count += conflict_safe_insert(db,TaxSlab,batch)
         run_count=0

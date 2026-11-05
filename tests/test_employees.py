@@ -5,9 +5,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
+from app.config import settings
+from app.models import User
+from tests.test_attendance_leave import token
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr(settings,"secret_key","test-only-signing-secret-at-least-32-bytes")
     engine=create_engine("sqlite://", connect_args={"check_same_thread":False}, poolclass=StaticPool)
     Base.metadata.create_all(engine); Testing=sessionmaker(bind=engine, autoflush=False)
     def override():
@@ -15,9 +19,10 @@ def client():
     app.dependency_overrides[get_db]=override
     with Testing.begin() as db:
         from app.models import Department, Role
+        db.add(User(user_id="TEST-ADMIN",employee_id=None,username="test-admin@example.test",password_hash="test",role="Admin",is_active=True))
         db.add(Department(department_id="D1",department_name="Engineering",cost_center="CC1"))
         db.add(Role(role_id="R1",department_id="D1",role_title="Engineer",level=1,grade="L1",band_min_annual=1,band_mid_annual=2,band_max_annual=3,overtime_eligible="N",band_year=2026))
-    with TestClient(app) as c: yield c
+    with TestClient(app,headers={"Authorization":f"Bearer {token('TEST-ADMIN','admin')}"}) as c: yield c
     app.dependency_overrides.clear(); Base.metadata.drop_all(engine); engine.dispose()
 
 def payload(id="E1", manager=None):
