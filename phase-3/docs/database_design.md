@@ -1,0 +1,7 @@
+# Database design
+
+The schema follows the supplied department, role, employee, assignment, and salary CSV names. IDs from the source files are primary keys. Department and role references are foreign keys, and employee manager references are self-referential. Salary structures reference employees, salary components, and their originating revision; revisions reference employees and the resulting role. Annual compensation bands and salary values use `Numeric` columns and salary calculations use `Decimal`.
+
+Alembic migrations create the organization schema and then the three salary tables. Source salary end dates are inclusive: an old record ending December 31 remains applicable that day, and its successor starts January 1. The database blocks negative amounts, invalid active date ranges, and duplicate active component start dates; the service closes prior periods and serializes revisions by employee.
+
+The loader replaces only these seven company-owned tables as one transaction after validating CSV columns, IDs, references, component snapshots, date ranges, and fixed annual totals. Five source rows for employee EMP-0079/revision SR-00439 have an end date before their start; they are retained, marked inactive, and excluded from salary retrieval. The next same-day revision SR-00440 supplies the valid structure. All other active employee/component intervals are non-overlapping. Soft delete preserves employee, assignment, and salary history.
