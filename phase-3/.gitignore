@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+*.db
+.pytest_cache/
+
+# Generated server logs
+*.log
+
+# Locally generated finance exports and payslip PDFs
+outputs/
+output/pdf/
+
+data/attendance.csv

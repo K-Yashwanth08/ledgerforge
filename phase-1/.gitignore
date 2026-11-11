@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+*.db
+.pytest_cache/
+
+# Generated server logs
+*.log
+
+data/attendance.csv
