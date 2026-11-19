@@ -3,6 +3,7 @@ from calendar import monthrange
 from decimal import Decimal
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..ledger_service import post_payroll_run
@@ -14,6 +15,37 @@ from ..security import (admin_actor, current_actor, hr_actor, require_employee_a
                         require_linked_admin_for_employee_payroll)
 
 router = APIRouter(prefix="/payroll", tags=["payroll"])
+
+class PayrollBatchRequest(BaseModel):
+    start_month: str = Field(pattern=r"^\d{4}-\d{2}$")
+
+    @field_validator("start_month")
+    @classmethod
+    def valid_month(cls, value: str) -> str:
+        year, month = map(int, value.split("-"))
+        if not 1 <= month <= 12:
+            raise ValueError("start_month must be a valid YYYY-MM month")
+        return value
+
+
+@router.post("/jobs/18-month", status_code=202)
+def enqueue_18_month_payroll(payload: PayrollBatchRequest, _actor: dict = Depends(hr_actor)):
+    from ..jobs import run_18_month_payroll
+    result = run_18_month_payroll.delay(payload.start_month)
+    return {"job_id": result.id, "status": "PENDING", "status_url": f"/api/v1/payroll/jobs/{result.id}"}
+
+
+@router.get("/jobs/{job_id}")
+def payroll_job_status(job_id: str, _actor: dict = Depends(hr_actor)):
+    from ..jobs import celery_app
+    result = celery_app.AsyncResult(job_id)
+    meta = result.info if isinstance(result.info, dict) else {}
+    response = {"job_id": job_id, "status": result.state,
+                "current": meta.get("current", 0), "total": meta.get("total", 18),
+                "month": meta.get("month"), "run_ids": meta.get("run_ids", [])}
+    if result.failed():
+        response["error"] = "Payroll batch failed; inspect worker logs for details."
+    return response
 
 def _run_out(run, warnings=None):
     value={name:getattr(run,name) for name in ("run_id","period_start","period_end","pay_date","employees_paid",

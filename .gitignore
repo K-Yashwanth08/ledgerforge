@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 *.db
 .pytest_cache/
+.coverage
+htmlcov/
 
 # Generated server logs
 *.log
@@ -13,3 +15,14 @@ outputs/
 output/pdf/
 
 data/attendance.csv
+
+# Protect company and financial source data
+data/
+phase-1/data/
+phase-2/data/
+phase-3/data/
+
+# Database and generated files
+*.sqlite
+*.sqlite3
+*.pdf

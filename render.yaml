@@ -1,0 +1,83 @@
+
+services:
+  - type: web
+    name: ledgerforge-api
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerCommand: python -m scripts.container_start
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ledgerforge-postgres
+          property: connectionString
+      - key: DATA_DIR
+        value: data
+      - key: SEED_COMPANY_DATA
+        value: "false"
+      - key: JWT_ISSUER
+        value: ledgerforge-production
+      - key: JWT_AUDIENCE
+        value: ledgerforge-api
+      - key: LEDGERFORGE_JWT_SECRET
+        generateValue: true
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: ledgerforge-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: ledgerforge-redis
+          property: connectionString
+
+  - type: worker
+    name: ledgerforge-worker
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerCommand: celery -A app.jobs.celery_app worker --loglevel=INFO --concurrency=1
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ledgerforge-postgres
+          property: connectionString
+      - key: DATA_DIR
+        value: data
+      - key: SEED_COMPANY_DATA
+        value: "false"
+      - key: LEDGERFORGE_JWT_SECRET
+        fromService:
+          type: web
+          name: ledgerforge-api
+          envVarKey: LEDGERFORGE_JWT_SECRET
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: ledgerforge-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: ledgerforge-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: ledgerforge-redis
+    plan: 256mb
+    region: singapore
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+
+databases:
+  - name: ledgerforge-postgres
+    region: singapore
+    plan: 0.1c-256mb
+    diskSizeGB: 5
+    postgresMajorVersion: "16"
+    databaseName: ledgerforge
+    user: ledgerforge_app
+    ipAllowList: []
