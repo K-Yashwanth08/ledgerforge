@@ -15,7 +15,7 @@ services:
       - key: DATA_DIR
         value: data
       - key: SEED_COMPANY_DATA
-        value: "false"
+        value: "true"
       - key: JWT_ISSUER
         value: ledgerforge-production
       - key: JWT_AUDIENCE
@@ -47,7 +47,7 @@ services:
       - key: DATA_DIR
         value: data
       - key: SEED_COMPANY_DATA
-        value: "false"
+        value: "true"
       - key: LEDGERFORGE_JWT_SECRET
         fromService:
           type: web

@@ -24,7 +24,7 @@ def initialize_database() -> None:
             # Only run destructive company-source replacement when the
             # application database is genuinely empty, not merely missing HR.
             needs_seed = all(db.query(model).count() == 0 for model in
-                             (Department, Employee, ChartOfAccount, JournalEntry, PayrollRun, User))
+                 (Department, Employee, ChartOfAccount, JournalEntry, PayrollRun))
         if needs_seed:
             # Seed all supplied snapshots in FK order. This path is never run
             # against a database containing application records.
