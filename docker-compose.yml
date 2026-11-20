@@ -1,0 +1,59 @@
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ledgerforge
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ledgerforge_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d ledgerforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  api:
+    build: .
+    command: ["python", "-m", "scripts.container_start"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED:?Set POSTGRES_PASSWORD_URLENCODED in .env}@db:5432/ledgerforge
+      DATA_DIR: data
+      LEDGERFORGE_JWT_SECRET: ${LEDGERFORGE_JWT_SECRET:?Set LEDGERFORGE_JWT_SECRET in .env}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SEED_COMPANY_DATA: ${SEED_COMPANY_DATA:-true}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["celery", "-A", "app.jobs.celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED:?Set POSTGRES_PASSWORD_URLENCODED in .env}@db:5432/ledgerforge
+      DATA_DIR: data
+      LEDGERFORGE_JWT_SECRET: ${LEDGERFORGE_JWT_SECRET:?Set LEDGERFORGE_JWT_SECRET in .env}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  ledgerforge_pg:

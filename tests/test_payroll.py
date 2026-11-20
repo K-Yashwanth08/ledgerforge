@@ -381,6 +381,18 @@ def test_company_details_reject_unreplaced_placeholders_and_invalid_email():
     with pytest.raises(ValidationError):
         Settings(_env_file=None,company_contact_email="not-an-email")
 
+def test_payroll_csv_export_includes_run_items_and_date_filter(payroll_client):
+    client, db = payroll_client
+    run, _ = run_payroll_month(db, "2025-04", date(2025, 5, 1))
+    headers = auth("HR1", "hr")
+    exported = client.get("/api/v1/payroll/export.csv?since=2025-04-01", headers=headers)
+    assert exported.status_code == 200 and "text/csv" in exported.headers["content-type"]
+    assert run.run_id in exported.text and "E1" in exported.text
+    assert client.get("/api/v1/payroll/export.csv?start_date=2025-05-01&end_date=2025-05-31",
+                      headers=headers).text.count("\n") == 1
+    assert client.get("/api/v1/payroll/export.csv?since=2025-04-01&end_date=2025-04-30",
+                      headers=headers).status_code == 422
+
 def test_payroll_draft_process_approve_pay_and_reverse_lifecycle(payroll_client):
     client,db=payroll_client
     account_rows=[("1001","Bank - Test","ASSET","DEBIT"),("1300","Employee advances","ASSET","DEBIT"),

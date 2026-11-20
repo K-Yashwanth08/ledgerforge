@@ -12,3 +12,5 @@ pytest>=8.0
 httpx>=0.27
 reportlab>=4.0
 pypdf>=4.0
+celery[redis]>=5.4
+coverage[toml]>=7.6

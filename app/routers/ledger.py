@@ -1,4 +1,5 @@
 from datetime import date
+from ..export_utils import csv_download, validate_date_filters
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from ..database import get_db
@@ -40,6 +41,26 @@ def entries(start_date:date|None=None,end_date:date|None=None,status:str|None="P
     if account_code:q=q.join(JournalLine,JournalLine.entry_id==JournalEntry.entry_id).filter(JournalLine.account_code==account_code).distinct()
     result=q.order_by(JournalEntry.entry_date.desc(),JournalEntry.entry_id).offset(offset).limit(limit).all()
     return [_out(db,e) for e in result]
+
+@router.get("/journal-entries.csv", include_in_schema=True)
+def export_entries(start_date: date | None = None, end_date: date | None = None,
+                   since: date | None = Query(None, description="Inclusive journal-entry date watermark"),
+                   status: str | None = "POSTED", db: Session = Depends(get_db),
+                   _actor: dict = Depends(hr_actor)):
+    validate_date_filters(start_date, end_date, since)
+    query = db.query(JournalEntry)
+    lower = since or start_date
+    if lower:
+        query = query.filter(JournalEntry.entry_date >= lower)
+    if end_date:
+        query = query.filter(JournalEntry.entry_date <= end_date)
+    if status:
+        query = query.filter(JournalEntry.status == status.upper())
+    query = query.order_by(JournalEntry.entry_date, JournalEntry.entry_id)
+    columns = ("entry_id", "entry_date", "posting_period", "financial_year", "description",
+        "source_type", "source_id", "status", "total_debit", "total_credit", "reversal_of_source_id")
+    return csv_download("ledgerforge-ledger.csv", columns,
+        ({key: getattr(entry, key) for key in columns} for entry in query.yield_per(1000)))
 
 @router.get("/journal-entries/{entry_id}",response_model=JournalEntryOut)
 def entry_detail(entry_id:str,db:Session=Depends(get_db),_actor:dict=Depends(hr_actor)):

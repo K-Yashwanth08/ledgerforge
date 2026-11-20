@@ -3,6 +3,7 @@ from calendar import monthrange
 from decimal import Decimal
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..ledger_service import post_payroll_run
@@ -12,8 +13,63 @@ from ..schemas import (PayrollItemOut, PayrollPaymentCreate, PayrollRunCreate,
                        PayrollRunDraftCreate, PayrollRunOut, ReversalCreate)
 from ..security import (admin_actor, current_actor, hr_actor, require_employee_access,
                         require_linked_admin_for_employee_payroll)
+from ..export_utils import csv_download, validate_date_filters
 
 router = APIRouter(prefix="/payroll", tags=["payroll"])
+
+@router.get("/export.csv", include_in_schema=True)
+def export_payroll(start_date: date | None = None, end_date: date | None = None,
+                   since: date | None = Query(None, description="Inclusive payroll-period watermark"),
+                   db: Session = Depends(get_db), actor: dict = Depends(hr_actor)):
+    validate_date_filters(start_date, end_date, since)
+    require_linked_admin_for_employee_payroll(actor)
+    query = db.query(PayrollItem, PayrollRun).join(PayrollRun, PayrollRun.run_id == PayrollItem.run_id)
+    lower = since or start_date
+    if lower:
+        query = query.filter(PayrollRun.period_start >= lower)
+    if end_date:
+        query = query.filter(PayrollRun.period_start <= end_date)
+    query = query.filter(PayrollRun.status != "REVERSED").order_by(
+        PayrollRun.period_start, PayrollRun.run_id, PayrollItem.employee_id)
+    columns = ("run_id", "period_start", "period_end", "pay_date", "status", "employee_id",
+        "department_id", "role_id", "gross_pay", "total_deductions", "net_pay",
+        "pf_employee", "esi_employee", "professional_tax", "tds", "other_deductions",
+        "pf_employer", "esi_employer", "employer_cost")
+    rows = ({**{key: getattr(run, key) for key in ("run_id", "period_start", "period_end", "pay_date", "status")},
+             **{key: getattr(item, key) for key in columns if key not in {"run_id", "period_start", "period_end", "pay_date", "status"}}
+            } for item, run in query.yield_per(1000))
+    return csv_download("ledgerforge-payroll.csv", columns, rows)
+
+class PayrollBatchRequest(BaseModel):
+    start_month: str = Field(pattern=r"^\d{4}-\d{2}$")
+
+    @field_validator("start_month")
+    @classmethod
+    def valid_month(cls, value: str) -> str:
+        year, month = map(int, value.split("-"))
+        if not 1 <= month <= 12:
+            raise ValueError("start_month must be a valid YYYY-MM month")
+        return value
+
+
+@router.post("/jobs/18-month", status_code=202)
+def enqueue_18_month_payroll(payload: PayrollBatchRequest, _actor: dict = Depends(hr_actor)):
+    from ..jobs import run_18_month_payroll
+    result = run_18_month_payroll.delay(payload.start_month)
+    return {"job_id": result.id, "status": "PENDING", "status_url": f"/api/v1/payroll/jobs/{result.id}"}
+
+
+@router.get("/jobs/{job_id}")
+def payroll_job_status(job_id: str, _actor: dict = Depends(hr_actor)):
+    from ..jobs import celery_app
+    result = celery_app.AsyncResult(job_id)
+    meta = result.info if isinstance(result.info, dict) else {}
+    response = {"job_id": job_id, "status": result.state,
+                "current": meta.get("current", 0), "total": meta.get("total", 18),
+                "month": meta.get("month"), "run_ids": meta.get("run_ids", [])}
+    if result.failed():
+        response["error"] = "Payroll batch failed; inspect worker logs for details."
+    return response
 
 def _run_out(run, warnings=None):
     value={name:getattr(run,name) for name in ("run_id","period_start","period_end","pay_date","employees_paid",

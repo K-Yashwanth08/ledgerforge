@@ -146,3 +146,16 @@ def test_reports_require_authorization_and_reject_unbalanced_posted_entry(report
                           headers=_hr())
     assert response.status_code == 409
     assert "JE-BAD" in response.json()["detail"]["entry_ids"]
+
+
+def test_ledger_csv_export_supports_date_and_since_filters(report_client):
+    client, _ = report_client
+    headers = _hr()
+    since = client.get("/api/v1/ledger/journal-entries.csv?since=2026-04-20", headers=headers)
+    assert since.status_code == 200 and "JE-EXPENSE" in since.text and "JE-OPEN" not in since.text
+    interval = client.get("/api/v1/ledger/journal-entries.csv?start_date=2026-04-15&end_date=2026-04-20",
+                          headers=headers)
+    assert "JE-REVENUE" in interval.text and "JE-EXPENSE" in interval.text
+    assert client.get("/api/v1/ledger/journal-entries.csv?since=2026-04-01&start_date=2026-04-02",
+                      headers=headers).status_code == 422
+    assert client.get("/api/v1/ledger/journal-entries.csv").status_code == 401

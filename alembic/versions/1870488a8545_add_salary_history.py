@@ -1,3 +1,4 @@
+
 """add salary history
 
 Revision ID: 1870488a8545
@@ -62,7 +63,7 @@ def upgrade() -> None:
     sa.Column('effective_to', sa.Date(), nullable=True),
     sa.Column('revision_id', sa.String(length=20), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
-    sa.CheckConstraint('effective_to IS NULL OR effective_to >= effective_from OR is_active = 0', name='ck_salary_structure_dates'),
+    sa.CheckConstraint('effective_to IS NULL OR effective_to >= effective_from OR is_active = FALSE', name='ck_salary_structure_dates'),
     sa.CheckConstraint('monthly_amount >= 0', name='ck_salary_structure_nonnegative'),
     sa.ForeignKeyConstraint(['component_id'], ['salary_components.component_id'], ),
     sa.ForeignKeyConstraint(['employee_id'], ['employees.employee_id'], ),

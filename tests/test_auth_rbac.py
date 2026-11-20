@@ -246,3 +246,155 @@ def test_deactivation_invalidates_existing_access_token(auth_client):
     admin = auth("ADMIN1", "Admin")
     assert client.patch("/users/HR1", json={"is_active": False}, headers=admin).status_code == 200
     assert client.get("/auth/me", headers=bearer).status_code == 401
+
+def test_user_list_get_and_not_found(auth_client):
+    client, _ = auth_client
+    headers = auth("ADMIN1", "Admin")
+
+    response = client.get("/users", headers=headers)
+    assert response.status_code == 200
+    assert len(response.json()) == 5
+
+    usernames = [item["username"] for item in response.json()]
+    assert usernames == sorted(usernames)
+
+    response = client.get("/users/EMP1", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["username"] == "employee1@example.test"
+
+    assert client.get("/users/UNKNOWN", headers=headers).status_code == 404
+
+
+def test_create_user_validation_and_normalization(auth_client):
+    client, db = auth_client
+    headers = auth("ADMIN1", "Admin")
+
+    response = client.post("/users", headers=headers, json={
+        "username": "  NEW.HR@EXAMPLE.TEST  ",
+        "password": "New-HR-Password-123!",
+        "role": " hr "
+    })
+
+    assert response.status_code == 201
+    created = response.json()
+    assert created["username"] == "new.hr@example.test"
+    assert created["role"] == "HR"
+    assert created["is_active"] is True
+
+    saved = db.get(User, created["user_id"])
+    assert saved is not None
+    assert verify_password("New-HR-Password-123!", saved.password_hash)
+
+    assert client.post("/users", headers=headers, json={
+        "username": "bad username",
+        "password": "Valid-Password-123!",
+        "role": "HR"
+    }).status_code == 422
+
+    assert client.post("/users", headers=headers, json={
+        "username": "invalidrole@example.test",
+        "password": "Valid-Password-123!",
+        "role": "Manager"
+    }).status_code == 422
+
+    assert client.post("/users", headers=headers, json={
+        "username": "shortpass@example.test",
+        "password": "short",
+        "role": "HR"
+    }).status_code == 422
+
+    assert client.post("/users", headers=headers, json={
+        "username": "duplicate@example.test",
+        "password": "Valid-Password-123!",
+        "role": "HR"
+    }).status_code == 201
+
+    assert client.post("/users", headers=headers, json={
+        "username": "duplicate@example.test",
+        "password": "Another-Password-123!",
+        "role": "HR"
+    }).status_code == 409
+
+
+def test_create_employee_user_requires_valid_employee(auth_client):
+    client, _ = auth_client
+    headers = auth("ADMIN1", "Admin")
+
+    assert client.post("/users", headers=headers, json={
+        "username": "missing.employee@example.test",
+        "password": "Valid-Password-123!",
+        "role": "Employee"
+    }).status_code == 422
+
+    assert client.post("/users", headers=headers, json={
+        "employee_id": "UNKNOWN",
+        "username": "unknown.employee@example.test",
+        "password": "Valid-Password-123!",
+        "role": "Employee"
+    }).status_code == 422
+
+
+def test_patch_user_validation_and_username_normalization(auth_client):
+    client, _ = auth_client
+    headers = auth("ADMIN1", "Admin")
+
+    response = client.patch("/users/HR1", headers=headers, json={
+        "username": "  UPDATED.HR@EXAMPLE.TEST  "
+    })
+
+    assert response.status_code == 200
+    assert response.json()["username"] == "updated.hr@example.test"
+
+    assert client.patch("/users/UNKNOWN", headers=headers, json={
+        "is_active": False
+    }).status_code == 404
+
+    assert client.patch("/users/HR1", headers=headers, json={
+        "role": "Manager"
+    }).status_code == 422
+
+    assert client.patch("/users/HR1", headers=headers, json={
+        "username": "employee1@example.test"
+    }).status_code == 409
+
+
+def test_last_active_admin_cannot_be_deactivated_or_demoted(auth_client):
+    client, db = auth_client
+    headers = auth("ADMIN1", "Admin")
+
+    response = client.patch("/users/ADMIN1", headers=headers, json={
+        "is_active": False
+    })
+    assert response.status_code == 409
+
+    response = client.patch("/users/ADMIN1", headers=headers, json={
+        "role": "HR"
+    })
+    assert response.status_code == 409
+
+    admin = db.get(User, "ADMIN1")
+    assert admin.is_active is True
+    assert admin.role == "Admin"
+
+
+def test_password_change_success_and_validation(auth_client):
+    client, db = auth_client
+    headers = auth("ADMIN1", "Admin")
+
+    assert client.post("/users/UNKNOWN/password", headers=headers, json={
+        "password": "New-Password-123!"
+    }).status_code == 404
+
+    assert client.post("/users/HR1/password", headers=headers, json={
+        "password": "short"
+    }).status_code == 422
+
+    response = client.post("/users/HR1/password", headers=headers, json={
+        "password": "Updated-HR-Password-123!"
+    })
+
+    assert response.status_code == 204
+
+    hr_user = db.get(User, "HR1")
+    assert verify_password("Updated-HR-Password-123!", hr_user.password_hash)
+    assert not verify_password("HumanResources-Test-1", hr_user.password_hash)

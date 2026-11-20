@@ -14,6 +14,56 @@ function sectionError(box, error) {
   box.textContent = error?.message || "The request could not be completed.";
 }
 
+function addPayrollExecutionPanel() {
+  const preview = document.getElementById("payrollForm");
+  if (!preview || document.getElementById("payrollRunForm")) return;
+  const panel = document.createElement("section");
+  panel.className = "panel";
+  panel.style.marginTop = "16px";
+  panel.innerHTML = `<div class="panel-head"><div><h2>Record monthly payroll</h2><div class="subtitle">Creates a persisted payroll run for the whole organization. HR or Admin access is required.</div></div></div>
+    <form id="payrollRunForm" class="formgrid">
+      <div class="field"><label for="payrollRunMonth">Payroll month</label><input id="payrollRunMonth" type="month" required value="${new Date().toISOString().slice(0, 7)}"></div>
+      <div class="field"><label for="payrollRunDate">Pay date</label><input id="payrollRunDate" type="date" required value="${new Date().toISOString().slice(0, 10)}"></div>
+      <div class="field full"><label for="payrollPayslipEmployee">Employee ID for payslip viewing</label><input id="payrollPayslipEmployee" required autocomplete="off" placeholder="Employee ID"></div>
+      <div class="full"><button id="payrollRunSubmit" class="button" type="submit">Create payroll run</button></div>
+    </form><div id="payrollRunResult" class="empty" aria-live="polite">The preview above does not save results. Use this form to record an actual payroll run.</div>`;
+  preview.closest(".panel")?.insertAdjacentElement("afterend", panel);
+
+  document.getElementById("payrollRunForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const month = document.getElementById("payrollRunMonth").value;
+    const payDate = document.getElementById("payrollRunDate").value;
+    const employeeId = document.getElementById("payrollPayslipEmployee").value.trim();
+    const result = document.getElementById("payrollRunResult");
+    const button = document.getElementById("payrollRunSubmit");
+    if (!window.confirm(`Create and persist payroll for ${month} for all eligible employees?`)) return;
+    button.disabled = true;
+    result.className = "empty";
+    result.textContent = "Processing payroll…";
+    try {
+      const run = await request("/payroll/runs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month, pay_date: payDate })
+      });
+      result.className = "";
+      result.innerHTML = `<div style="padding:18px"><span class="badge">${esc(run.status)}</span><p>Run <strong>${esc(run.run_id)}</strong> · ${esc(run.employees_paid)} employees</p><div class="metrics"><article class="card metric"><div class="metric-label">GROSS</div><div class="metric-value">${money(run.total_gross)}</div></article><article class="card metric"><div class="metric-label">DEDUCTIONS</div><div class="metric-value">${money(run.total_deductions)}</div></article><article class="card metric"><div class="metric-label">NET PAY</div><div class="metric-value">${money(run.total_net)}</div></article></div><button id="openCreatedPayslip" class="button secondary">View employee payslip</button></div>`;
+      document.getElementById("openCreatedPayslip").onclick = () => {
+        setPage("payslips");
+        setTimeout(() => {
+          const employee = document.getElementById("payslipEmployee");
+          if (!employee) return;
+          employee.value = employeeId;
+          document.getElementById("payslipLoad")?.click();
+        }, 0);
+      };
+    } catch (error) {
+      sectionError(result, error);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
 function claimsHint(token) {
   return authUser?.role?.toLowerCase() || "employee";
 }

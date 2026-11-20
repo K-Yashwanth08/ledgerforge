@@ -7,6 +7,7 @@ from ..database import get_db
 from ..models import Department, Employee, Role
 from ..schemas import EmployeeCreate, EmployeeOut, EmployeePatch
 from ..security import admin_actor, current_actor, hr_actor, require_employee_access
+from ..export_utils import csv_download, validate_date_filters
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -28,6 +29,25 @@ def list_employees(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, 
     if department_id: q = q.filter(Employee.department_id == department_id)
     if role_id: q = q.filter(Employee.role_id == role_id)
     return [output(e) for e in q.order_by(Employee.employee_id).offset(offset).limit(limit).all()]
+
+@router.get("/export.csv", include_in_schema=True)
+def export_employees(start_date: date | None = None, end_date: date | None = None,
+                     since: date | None = Query(None, description="Inclusive hire-date watermark"),
+                     db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):
+    """Export employee directory rows; date filters apply to hire_date."""
+    validate_date_filters(start_date, end_date, since)
+    query = db.query(Employee)
+    lower = since or start_date
+    if lower:
+        query = query.filter(Employee.hire_date >= lower)
+    if end_date:
+        query = query.filter(Employee.hire_date <= end_date)
+    rows = (query.order_by(Employee.employee_id).all())
+    columns = ("employee_id", "first_name", "last_name", "full_name", "work_email",
+        "hire_date", "exit_date", "employment_status", "employment_type", "department_id",
+        "role_id", "manager_id", "work_location", "work_mode")
+    return csv_download("ledgerforge-employees.csv", columns,
+        ({key: getattr(employee, key) for key in columns} for employee in rows))
 
 @router.get("/stats", include_in_schema=True)
 def employee_stats(db: Session = Depends(get_db), _actor: dict = Depends(hr_actor)):

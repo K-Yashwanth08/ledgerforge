@@ -91,3 +91,16 @@ def test_setting_departed_status_soft_deletes_from_directory(client):
     r=client.patch("/employees/E1",json={"employment_status":"Terminated"})
     assert r.status_code==200 and r.json()["exit_date"]
     assert client.get("/employees").json()==[]
+
+def test_employee_csv_export_filters_on_hire_date_and_rejects_ambiguous_ranges(client):
+    client.post("/employees", json=payload("E1"))
+    newer = payload("E2")
+    newer["hire_date"] = "2025-01-01"
+    client.post("/employees", json=newer)
+    response = client.get("/api/v1/employees/export.csv?since=2025-01-01")
+    assert response.status_code == 200
+    assert "E2" in response.text and "E1" not in response.text
+    assert client.get("/api/v1/employees/export.csv?since=2025-01-01&start_date=2025-01-01").status_code == 422
+
+def test_employee_csv_export_requires_authentication(client):
+    assert client.get("/api/v1/employees/export.csv", headers={"Authorization": "Bearer invalid"}).status_code == 401
